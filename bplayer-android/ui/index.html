@@ -229,27 +229,6 @@
     accent-color: var(--accent); width: 16px; height: 16px; cursor: pointer;
   }
   .settings-desc { font-size: 11px; color: var(--muted); line-height: 1.65; padding-left: 24px; }
-  .settings-path {
-    font-size: 11px; color: var(--muted); line-height: 1.7; padding-left: 24px;
-    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
-  }
-  .settings-path code {
-    font-family: Consolas, "Courier New", monospace; font-size: 10.5px;
-    background: #232733; border: 1px solid var(--line); border-radius: 4px;
-    padding: 1px 5px; color: var(--text);
-  }
-  .settings-path .where {
-    color: var(--text); max-width: 240px;
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-    direction: rtl; text-align: left;
-  }
-  .settings-path .path-btn {
-    background: none; border: 1px solid var(--line); color: var(--muted);
-    border-radius: 6px; padding: 2px 9px; font-size: 11px; font-family: inherit;
-    cursor: pointer; transition: color .15s, border-color .15s;
-  }
-  .settings-path .path-btn:hover:not(:disabled) { color: var(--accent); border-color: var(--accent); }
-  .settings-path .path-btn:disabled { opacity: .4; cursor: default; }
   .settings-foot {
     font-size: 11px; color: var(--muted); line-height: 1.65;
     border-top: 1px solid var(--line); padding-top: 10px;
@@ -401,21 +380,12 @@
       <div class="settings-row">
         <label><input type="checkbox" id="optAutoAudio" /> 自动转换不支持的音轨</label>
         <div class="settings-desc">开片时若音轨内核解不了（DTS / TrueHD / AC-4 等），后台转成 AAC 外挂音轨。关闭后不自动转，需要在「音轨」菜单里点那条轨道才开始。</div>
-        <div class="settings-path">
-          <span>产物：视频同目录 · <code>原片名 (音轨N).mka</code></span>
-          <span class="where" id="whereAudio">—</span>
-          <button type="button" class="path-btn" id="openAudioDir" disabled>打开位置</button>
-        </div>
       </div>
 
       <div class="settings-row">
         <label><input type="checkbox" id="optAutoSubtitle" /> 自动转换不支持的字幕</label>
         <div class="settings-desc">开片时自动抽取内嵌文本字幕轨。有 Cues 索引的片子约 0.2 秒，没有的要顺序读一遍整个文件（40 GB 约 4 分钟），所以默认关闭；需要时在「字幕」菜单里手动选。PGS 位图字幕走即时解码，不受此项影响。</div>
-        <div class="settings-path">
-          <span>内嵌字幕只读进内存，<b>不写任何文件</b></span>
-          <span class="where" id="whereSub">旧的 (字幕N).srt 缓存可在此清理</span>
-          <button type="button" class="path-btn" id="openSubDir" disabled>打开视频目录</button>
-        </div>
+        <div class="settings-desc">内嵌字幕只读进内存，<b>不写任何文件</b></div>
       </div>
 
       <div class="settings-foot">音轨自动转换默认开启：内核解不了的音轨会自动转成外挂 AAC 并静音原轨，不会放出错的轨道。字幕的自动转换要读整片，默认关闭。同目录的外挂字幕、同名弹幕照旧自动加载。</div>
@@ -1988,49 +1958,7 @@
     invoke('get_autostart').then(function (on) {
       $('optAutostart').checked = !!on;
     }).catch(function () { $('optAutostart').checked = false; });
-    fillSidecarPath($('whereAudio'), $('openAudioDir'), /\.mka$/i);
-    // 字幕不再落盘，这里只用来定位旧版留下的 (字幕N).srt
-    fillSidecarPath($('whereSub'), $('openSubDir'), /\.srt$/i, true);
   }
-
-  // 缓存产物就在视频旁边，把目录和数量显示出来，方便用户自己清
-  function fillSidecarPath(whereEl, btnEl, wantExt, legacyOnly) {
-    if (!currentVideoPath) {
-      whereEl.textContent = '打开视频后显示';
-      whereEl.title = '';
-      btnEl.disabled = true;
-      btnEl.dataset.path = '';
-      return;
-    }
-    var dir = currentVideoPath.replace(/[\\/][^\\/]+$/, '');
-    invoke('sidecar_cache_files', { videoPath: currentVideoPath }).then(function (files) {
-      var hit = (files || []).filter(function (p) { return wantExt.test(p); });
-      if (hit.length) {
-        whereEl.textContent = (legacyOnly ? '旧缓存 ' : '') + dir + '（' + hit.length + ' 个）';
-        whereEl.title = hit.join('\n');
-        btnEl.dataset.path = hit[0];
-      } else {
-        whereEl.textContent = legacyOnly ? '没有旧的字幕缓存' : dir + '（暂无）';
-        whereEl.title = dir;
-        btnEl.dataset.path = dir;
-      }
-      btnEl.disabled = false;
-    }).catch(function () {
-      whereEl.textContent = dir;
-      whereEl.title = dir;
-      btnEl.dataset.path = dir;
-      btnEl.disabled = false;
-    });
-  }
-
-  function openSidecarPath(btn) {
-    var p = btn.dataset.path;
-    if (!p) return;
-    invoke('reveal_path', { path: p }).catch(function (e) { toast('打开位置失败：' + e, 6000); });
-  }
-
-  $('openAudioDir').addEventListener('click', function () { openSidecarPath(this); });
-  $('openSubDir').addEventListener('click', function () { openSidecarPath(this); });
 
   function closeSettings() { $('settingsMask').hidden = true; }
 
