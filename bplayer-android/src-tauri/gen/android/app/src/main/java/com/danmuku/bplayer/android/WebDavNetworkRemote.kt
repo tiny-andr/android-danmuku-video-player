@@ -31,6 +31,9 @@ internal class WebDavNetworkRemote(private val source: NetworkSource) : NetworkR
       .tlsVersions(TlsVersion.TLS_1_3, TlsVersion.TLS_1_2).build()))
     .build()
   private val streamingClient = client.newBuilder().callTimeout(0, TimeUnit.MILLISECONDS).build()
+  @Volatile private var closed = false
+  override fun isConnected(): Boolean = !closed
+  override fun abort() { closed = true; client.dispatcher.cancelAll() }
 
   init {
     val parsed = source.url.toHttpUrlOrNull() ?: throw NetworkFailure("请输入完整的 HTTPS WebDAV 地址")
@@ -238,7 +241,7 @@ internal class WebDavNetworkRemote(private val source: NetworkSource) : NetworkR
   }
 
   override fun close() {
-    client.dispatcher.cancelAll()
+    abort()
     client.connectionPool.evictAll()
     client.dispatcher.executorService.shutdown()
   }

@@ -137,8 +137,7 @@ internal class AndroidNetwork(
   private fun <Result> withRemote(path: String, action: (NetworkPath, NetworkRemote) -> Result): Result {
     val parsed = NetworkPaths.parse(path)
     val source = store.get(parsed.id)
-    try { return action(parsed, connections.get(source)) }
-    catch (error: Exception) { connections.invalidate(parsed.id); throw error }
+    return connections.run(source) { remote -> action(parsed, remote) }
   }
 
   private fun listing(path: String, entries: List<RemoteEntry>): JSONObject = JSONObject().put("dir", path)

@@ -427,6 +427,7 @@
 <script src="vendor/artplayer-plugin-danmuku.js"></script>
 <script src="vendor/artplayer-plugin-audio-track.js"></script>
 <script src="android-storage.js"></script>
+<script src="android-gestures.js"></script>
 <script src="android-shell.js"></script>
 <script>
 (function () {
@@ -443,7 +444,7 @@
 
   var CONFIG_KEY = 'bplayer_danmaku_config';
   // 1.2.6：弹幕默认改为 极慢 / 同步速度 / 显示区域 1/4 / 不透明 100%，旧存档按新默认走一次
-  var CONFIG_VER = 2;
+  var CONFIG_VER = 3;
 
   /* ---- 应用设置（齿轮页）：音轨自动转换默认开，字幕默认关 ---- */
   var SETTINGS_KEY = 'bplayer_settings';
@@ -656,10 +657,10 @@
    * ------------------------------------------------------------------ */
   function defaultDanmakuOption() {
     return {
-      speed: 20,                 // 极慢（SPEED_STEPS 里 20 秒/屏）
+      speed: 9,
       antiOverlap: true,         // 防止弹幕重叠
       synchronousPlayback: true, // 同步视频速度
-      fontSize: 25,
+      fontSize: 18,
       theme: 'light',
       margin: [10, '75%'],       // 显示区域 1/4（插件里 MARGIN 的档位值）
       opacity: 100,              // 不透明度，插件按 0~100 取值
@@ -670,9 +671,12 @@
   function loadSavedConfig() {
     try {
       var c = JSON.parse(localStorage.getItem(CONFIG_KEY)) || {};
-      // 1.2.6 调整了默认值（极慢 / 同步速度 / 显示区域 1/4）：旧存档没有版本号，
-      // 一律按新默认走一次，否则老用户看到的还是自己很久以前存的值
-      if (c.ver !== CONFIG_VER) return {};
+      if (c.ver !== CONFIG_VER && c.ver !== 2) return {};
+      if (c.ver === 2) {
+        if (c.speed === 20) c.speed = 9;
+        c.ver = CONFIG_VER;
+        localStorage.setItem(CONFIG_KEY, JSON.stringify(c));
+      }
       delete c.ver;
       if (typeof c.speed === 'number') c.speed = snapSpeed(c.speed);
       return c;
@@ -731,6 +735,7 @@
     // 终生只能挂一条 WebAudio 支路、无法解绑 —— 一旦为死编码音轨隔离过一次，
     // 后面换任何文件都永久无声（gain 改回 1 也没用，链上输出是零）。
     // 实测：同一元素加 crossOrigin 后捕获输出 RMS 0.025，不加为 0。
+    if (window.AndroidPlayback) window.AndroidPlayback.attach(art);
     var vEl = art.video || (art.template && art.template.$video);
     if (vEl) vEl.crossOrigin = 'anonymous';
     art.url = url;
@@ -765,6 +770,7 @@
   }
 
   function setVideoFromUrl(url, name, size) {
+    if (window.AndroidPlayback) window.AndroidPlayback.source(url);
     if (currentVideoName !== name) danmakuLoadToken++; // 作废仍在解析的旧弹幕任务
     currentVideoName = name;
     if (!art) {
@@ -807,7 +813,7 @@
     $('infobar').hidden = false;
     $('infoCount').textContent = list.length.toLocaleString() + ' 条';
     $('infoParse').textContent = ms + ' ms';
-    toast('已装载 ' + list.length.toLocaleString() + ' 条弹幕');
+    if (!window.AndroidPlayback) toast('已装载 ' + list.length.toLocaleString() + ' 条弹幕');
   }
 
   /* 弹幕解析任务代际：切换视频/清空后，过期解析结果直接丢弃。
@@ -1853,16 +1859,21 @@
     var videoLoadToken = 0;
     async function desktopLoadVideo(path, manualDanPath, epIndex) {
       var token = ++videoLoadToken;
+      hideToast();
+      if (window.AndroidPlayback) window.AndroidPlayback.begin(path, pathName(path));
       try { await loadVideoSource(path, manualDanPath, epIndex, token); }
       catch (error) {
-        if (token === videoLoadToken) toast('读取失败：' + (error.message || String(error)), 7000);
+        if (token === videoLoadToken) {
+          if (window.AndroidPlayback) window.AndroidPlayback.fail(error.message || String(error));
+          else toast('读取失败：' + (error.message || String(error)), 7000);
+        }
       }
     }
     async function loadVideoSource(path, manualDanPath, epIndex, token) {
       var name = pathName(path);
       var st = await invoke('fs_stat', { path: path });
       if (token !== videoLoadToken) return;
-      if (st.kind !== 'file') { toast('文件不存在：' + name); return; }
+      if (st.kind !== 'file') throw new Error('文件不存在：' + name);
       currentVideoPath = normPath(path);
       clearDanmaku();
       probeTracks = null;
@@ -1891,6 +1902,14 @@
       handleAudioCodecs(path, name);
       // 外挂字幕扫描对全部视频类型生效（内嵌轨只有 MKV 能探测，由 handleAudioCodecs 补齐）
       if (!/\.(mkv|mka|webm)$/i.test(name)) buildSubtitleMenu(path, null, ++probeToken);
+      loadVideoSidecars(path, manualDanPath, epIndex, token).catch(function (error) {
+        if (token !== videoLoadToken) return;
+        chipDanmaku.textContent = '💬 附件读取失败';
+        if (!window.AndroidPlayback || !window.AndroidPlayback.loading) toast('视频已打开，附件读取失败：' + (error.message || String(error)), 6000);
+      });
+    }
+    async function loadVideoSidecars(path, manualDanPath, epIndex, token) {
+      var name = pathName(path);
       var dir = pathDir(path);
       if (epIndex == null) {
         if (!playlist.length || playlistDir !== normPath(dir)) {
@@ -1916,15 +1935,16 @@
         if (token !== videoLoadToken) return;
         if (pair) {
           desktopLoadDanmaku(pair.name, pair.text);
-          toast('已自动加载同名弹幕：' + pair.name);
+          if (!window.AndroidPlayback) toast('已自动加载同名弹幕：' + pair.name);
         } else {
           clearDanmaku();
-          toast('「' + baseName(name) + '」同目录没有同名弹幕（.xml / .json）', 4200);
+          if (!window.AndroidPlayback) toast('「' + baseName(name) + '」同目录没有同名弹幕（.xml / .json）', 4200);
         }
       }
     }
     window.__BplayerDesktop = {
       loadVideo: desktopLoadVideo,
+      cancelLoad: function () { videoLoadToken++; probeToken++; danmakuLoadToken++; },
       get currentPath() { return currentVideoPath; },
       // 拖入字幕的入口（拖放回调与外部调试共用）
       addSubtitle: addDroppedSubtitle,

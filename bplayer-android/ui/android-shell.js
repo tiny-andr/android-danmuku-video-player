@@ -13,6 +13,12 @@
   var topbar = null;
   var infoPanel = null;
   var playing = false;
+  var loading = false;
+  var loadPanel = null;
+  var loadTimer = null;
+  var requestedPath = "";
+  var expectedUrl = "";
+  var failedLoad = false;
   var hookedArt = null;
 
   function el(tag, cls, text) {
@@ -85,17 +91,16 @@
 
       /* ---- 播放页顶部悬浮条 ---- */
       "#mTop{position:fixed;top:0;left:0;right:0;z-index:100000;display:flex;align-items:center;gap:10px;" +
-      "padding:calc(env(safe-area-inset-top,0px) + 6px) calc(env(safe-area-inset-right,0px) + 12px) 24px " +
+      "padding:calc(env(safe-area-inset-top,0px) + 6px) calc(env(safe-area-inset-right,0px) + 12px) 10px " +
       "calc(env(safe-area-inset-left,0px) + 12px);" +
-      "background:linear-gradient(rgba(0,0,0,.78) 0%,rgba(0,0,0,.34) 62%,transparent 100%);" +
+      "background:rgba(0,0,0,.94);border-bottom:1px solid #ffffff18;" +
       "opacity:0;transform:translateY(-10px);pointer-events:none;transition:opacity .2s,transform .2s;}" +
       "#mTop.show{opacity:1;transform:none;pointer-events:auto;}" +
       "#mTop .mIconBtn{flex:none;width:42px;height:42px;border-radius:50%;border:0;background:rgba(255,255,255,.12);" +
       "color:#fff;font-size:20px;line-height:42px;padding:0;font-family:inherit;}" +
       "#mTop .mIconBtn:active{background:rgba(255,255,255,.26);}" +
       "#mBack{font-size:27px;font-weight:300;line-height:38px;}" +
-      "#mDanBtn{font-size:14px;opacity:.5;}" +
-      "#mDanBtn.on{opacity:1;background:rgba(251,114,153,.85);}" +
+      "#mTop #mRotateBtn{width:auto;min-width:58px;padding:0 10px;border-radius:13px;font-size:12px;line-height:normal;}" +
       "#mInfoBtn{font-size:16px;font-family:Georgia,serif;font-style:italic;}" +
       ".mTitleBox{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px;}" +
       "#mTitle{font-size:14px;font-weight:600;color:#fff;overflow:hidden;text-overflow:ellipsis;" +
@@ -135,6 +140,23 @@
       "height:100vh!important;z-index:99990!important;border:0!important;border-radius:0!important;" +
       "box-shadow:none!important;transform:none!important;animation:none!important;}" +
       "body.m-playing #player{position:static!important;width:100%!important;height:100%!important;}" +
+      "#player .art-video-player .art-bottom{background-image:linear-gradient(#000e,#000f)!important;background-size:100% var(--m-controls-height,76px)!important;background-repeat:no-repeat!important;overflow:visible!important;opacity:0!important;}" +
+      "#player .art-video-player.art-control-show .art-bottom{opacity:1!important;}" +
+      "#player .art-video-player .art-controls,#player .art-video-player .art-progress{transform:none!important;pointer-events:none!important;}" +
+      "#player .art-video-player.art-control-show .art-controls,#player .art-video-player.art-control-show .art-progress{pointer-events:auto!important;}" +
+      "#player .art-controls{height:auto!important;min-height:44px;flex-wrap:wrap;gap:0 4px;padding-bottom:calc(env(safe-area-inset-bottom,0px) + 4px);}" +
+      "#player .art-controls-left,#player .art-controls-right{height:44px!important;min-width:0;margin:0!important;}" +
+      "#player .art-controls-right{margin-left:auto!important;gap:0;}#player .art-controls-center{display:none!important;}" +
+      "#player .art-controls .art-control{min-width:40px!important;min-height:44px!important;}#player .art-control-time{min-width:0!important;font-size:11px!important;padding:0 4px!important;}" +
+      "#player .mDanControls{display:flex;align-items:center;flex:none;height:44px;}" +
+      "#player .mDanControls .artplayer-plugin-danmuku{width:auto!important;height:44px!important;gap:0!important;}" +
+      "#player .mDanControls .apd-emitter{display:none!important;}" +
+      "#player .mDanControls>.artplayer-plugin-danmuku>.apd-toggle>.apd-icon,#player .mDanControls>.artplayer-plugin-danmuku>.apd-config>.apd-icon{fill:#f2f4ff!important;opacity:1!important;}" +
+      "#player .mDanControls .apd-toggle,#player .mDanControls .apd-config{min-width:44px;height:44px;display:flex;align-items:center;justify-content:center;}" +
+      "#player .mDanControls .apd-config-panel{position:fixed!important;left:12px!important;right:12px!important;bottom:calc(var(--m-controls-height,76px) + 8px)!important;width:auto!important;max-width:480px;margin:0 auto;padding:0!important;max-height:calc(100vh - var(--m-controls-height,76px) - 88px);overflow:auto;opacity:0!important;pointer-events:none!important;z-index:100080;}" +
+      "#player .mDanControls.is-config-open .apd-config-panel{opacity:1!important;pointer-events:auto!important;}" +
+      "#player .mDanControls .apd-config-panel-inner{background:#090b11fa!important;border:1px solid #ffffff30;border-radius:15px;padding:16px!important;font-size:13px;}" +
+      "#player .mDanControls .apd-value{font-size:12px;}" +
 
       /* ---- 播放列表 / 设置升级为手机尺寸 ---- */
       "#playlist{z-index:100100!important;width:min(340px,74vw)!important;" +
@@ -238,12 +260,6 @@
       row.addEventListener("click", function () {
         if (!window.__BplayerDesktop) return;
         window.__BplayerDesktop.loadVideo(item.p, null);
-        // 同一个文件不会重新触发 loadedmetadata，这里兜底进入播放页
-        setTimeout(function () {
-          var chip = document.getElementById("chipVideo");
-          var cur = chip ? chip.textContent : "";
-          if (cur && item.n && cur.indexOf(item.n) >= 0) enterPlaying();
-        }, 500);
       });
       box.appendChild(row);
     });
@@ -318,7 +334,7 @@
     topbar.innerHTML =
       '<button type="button" class="mIconBtn" id="mBack" title="返回">‹</button>' +
       '<div class="mTitleBox"><div id="mTitle">—</div><div id="mDan"></div></div>' +
-      '<button type="button" class="mIconBtn on" id="mDanBtn" title="弹幕开关">弹</button>' +
+      '<button type="button" class="mIconBtn" id="mRotateBtn" title="切换为横屏" aria-label="切换为横屏">横屏</button>' +
       '<button type="button" class="mIconBtn" id="mInfoBtn" title="视频信息与功能">i</button>' +
       '<button type="button" class="mIconBtn" id="mPlBtn" title="播放列表">≡</button>';
     document.body.appendChild(topbar);
@@ -334,13 +350,13 @@
       var pl = document.getElementById("playlist");
       if (pl) pl.classList.add("open");
     });
-    document.getElementById("mDanBtn").addEventListener("click", function () {
-      var btn = this;
+    document.getElementById("mRotateBtn").addEventListener("click", function () {
+      if (!playing) return;
+      closeDanmakuSettings();
+      var direction = innerWidth > innerHeight ? "portrait" : "landscape";
+      try { if (window.AndroidUI && window.AndroidUI.setPlaybackOrientation) window.AndroidUI.setPlaybackOrientation(direction); } catch (error) {}
       var art = window.Bplayer && window.Bplayer.art;
-      var p = art && art.plugins && art.plugins.artplayerPluginDanmuku;
-      if (!p) return;
-      if (p.isHide) { p.show(); btn.classList.add("on"); }
-      else { p.hide(); btn.classList.remove("on"); }
+      if (art) art.controls.show = true;
     });
   }
 
@@ -435,16 +451,155 @@
     } catch (e) {}
   }
 
-  function setLandscape(on) {
-    try {
-      if (window.AndroidUI && window.AndroidUI.setLandscape) {
-        window.AndroidUI.setLandscape(!!on);
-      }
-    } catch (e) {}
+  function ensureLoadPanel() {
+    if (loadPanel) return;
+    var style = el("style");
+    style.textContent = "#mLoading{position:fixed;inset:0;z-index:200005;background:#090c12;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;padding:calc(env(safe-area-inset-top,0px) + 24px) calc(env(safe-area-inset-right,0px) + 24px) calc(env(safe-area-inset-bottom,0px) + 24px) calc(env(safe-area-inset-left,0px) + 24px);color:#dce3f5;font:14px system-ui,sans-serif;text-align:center}#mLoading[hidden]{display:none!important}#mLoadingName{font-size:17px;font-weight:600;max-width:min(100%,640px);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}#mLoadingMessage{max-width:560px;line-height:1.7;white-space:pre-line;overflow-wrap:anywhere;color:#9ca9c2}#mLoading.failed #mLoadingMessage{color:#ff9fb4}#mLoadingSpinner{width:32px;height:32px;border:3px solid #b28bff30;border-top-color:#b28bff;border-radius:50%;animation:mLoadingSpin .8s linear infinite}#mLoading.failed #mLoadingSpinner{display:none}#mLoadingActions{display:flex;gap:12px}#mLoadingActions button{min-height:44px;padding:10px 22px;border-radius:12px;border:1px solid #ffffff25;background:#ffffff0a;color:#eee;font:inherit}#mLoadingRetry{background:#8b68ef44!important}@keyframes mLoadingSpin{to{transform:rotate(360deg)}}";
+    document.head.appendChild(style);
+    loadPanel = el("div"); loadPanel.id = "mLoading"; loadPanel.hidden = true;
+    loadPanel.setAttribute("role", "status");
+    loadPanel.innerHTML = '<div id="mLoadingSpinner"></div><div id="mLoadingName"></div><div id="mLoadingMessage"></div><div id="mLoadingActions"><button type="button" id="mLoadingCancel">返回文件列表</button><button type="button" id="mLoadingRetry" hidden>重试</button></div>';
+    document.body.appendChild(loadPanel);
+    document.getElementById("mLoadingCancel").addEventListener("click", cancelLoading);
+    document.getElementById("mLoadingRetry").addEventListener("click", function () {
+      if (requestedPath && window.__BplayerDesktop) window.__BplayerDesktop.loadVideo(requestedPath, null);
+    });
+  }
+
+  function beginLoading(path, name) {
+    ensureLoadPanel(); clearTimeout(loadTimer);
+    requestedPath = path; expectedUrl = ""; loading = true; failedLoad = false; playing = false;
+    closeDanmakuSettings(); setVideoOrientation(0, 0);
+    releaseVideo();
+    document.body.classList.add("m-playing");
+    if (home) home.classList.add("hide");
+    if (topbar) topbar.classList.remove("show");
+    openInfo(false);
+    var playlist = document.getElementById("playlist");
+    if (playlist) playlist.classList.remove("open");
+    loadPanel.classList.remove("failed"); loadPanel.hidden = false;
+    loadPanel.setAttribute("role", "status");
+    document.getElementById("mLoadingName").textContent = name;
+    document.getElementById("mLoadingMessage").textContent = "正在打开视频…";
+    document.getElementById("mLoadingRetry").hidden = true;
+    setImmersive(true); setPlaybackActive(true); window.AndroidGestures.setActive(false);
+    loadTimer = setTimeout(function () { failLoading("连接或缓冲超时，请检查网络后重试。"); }, 30000);
+  }
+
+  function sourceLoading(url) {
+    try { expectedUrl = new URL(url, location.href).href; } catch (error) { expectedUrl = url; }
+    if (loading) document.getElementById("mLoadingMessage").textContent = "正在缓冲视频…";
+  }
+
+  function matchesSource(art) {
+    return !!(requestedPath && expectedUrl && art && art.video && art.video.src === expectedUrl && art.video.currentSrc === expectedUrl);
+  }
+
+  function failLoading(message) {
+    if (!requestedPath) return;
+    ensureLoadPanel(); clearTimeout(loadTimer);
+    loading = true; failedLoad = true; playing = false;
+    if (window.__BplayerDesktop && window.__BplayerDesktop.cancelLoad) window.__BplayerDesktop.cancelLoad();
+    releaseVideo(); setPlaybackActive(false); window.AndroidGestures.setActive(false);
+    loadPanel.hidden = false; loadPanel.classList.add("failed"); loadPanel.setAttribute("role", "alert");
+    document.getElementById("mLoadingMessage").textContent = "视频打开失败\n" + message;
+    document.getElementById("mLoadingRetry").hidden = false;
+  }
+
+  function cancelLoading() {
+    var dir = requestedPath.replace(/\/[^/]+$/, "");
+    exitPlaying();
+    window.AndroidFiles.open("file", null, dir).then(function (value) {
+      if (value && window.__BplayerDesktop) window.__BplayerDesktop.loadVideo(value, null);
+    }).catch(showStorageError);
+  }
+
+  function releaseVideo() {
+    var art = window.Bplayer && window.Bplayer.art;
+    if (!art || !art.video) return;
+    try { art.pause(); art.video.removeAttribute("src"); art.video.load(); } catch (error) {}
+  }
+
+  function setPlaybackActive(on) {
+    try { if (window.AndroidUI && window.AndroidUI.setPlaybackActive) window.AndroidUI.setPlaybackActive(!!on); } catch (error) {}
+  }
+
+  function setVideoOrientation(width, height) {
+    try { if (window.AndroidUI && window.AndroidUI.setVideoOrientation) window.AndroidUI.setVideoOrientation(width || 0, height || 0); } catch (error) {}
+  }
+
+  function updateRotateButton() {
+    var button = document.getElementById("mRotateBtn");
+    if (!button) return;
+    var label = innerWidth > innerHeight ? "竖屏" : "横屏";
+    button.textContent = label;
+    button.title = "切换为" + label;
+    button.setAttribute("aria-label", "切换为" + label);
+  }
+
+  function closeDanmakuSettings() {
+    var controls = document.querySelector(".mDanControls");
+    if (!controls || !controls.classList.contains("is-config-open")) return false;
+    controls.classList.remove("is-config-open");
+    var button = controls.querySelector(".apd-config");
+    if (button) button.setAttribute("aria-expanded", "false");
+    return true;
+  }
+
+  function sizePlaybackControls() {
+    var art = window.Bplayer && window.Bplayer.art;
+    var controls = document.querySelector("#player .art-controls");
+    var progress = document.querySelector("#player .art-progress");
+    if (!controls) return;
+    var height = Math.ceil(controls.offsetHeight + (progress ? progress.offsetHeight : 0) + 8);
+    document.documentElement.style.setProperty("--m-controls-height", height + "px");
+    if (art && art.controls.show) updateRotateButton();
+  }
+
+  function mountDanmakuControls(art) {
+    var plugin = art.plugins && art.plugins.artplayerPluginDanmuku;
+    var right = art.template && art.template.$controlsRight;
+    if (!plugin || !right || right.querySelector(".mDanControls")) return;
+    var controls = el("div", "mDanControls");
+    right.insertBefore(controls, right.firstChild);
+    plugin.mount(controls);
+    var toggle = controls.querySelector(".apd-toggle");
+    var config = controls.querySelector(".apd-config");
+    if (toggle) {
+      toggle.setAttribute("role", "button"); toggle.setAttribute("tabindex", "0");
+      toggle.setAttribute("aria-label", "弹幕开关");
+      toggle.addEventListener("keydown", function (event) {
+        if (event.key === "Enter" || event.key === " ") { event.preventDefault(); toggle.click(); }
+      });
+    }
+    if (config) {
+      config.setAttribute("role", "button"); config.setAttribute("tabindex", "0");
+      config.setAttribute("aria-label", "弹幕设置"); config.setAttribute("aria-expanded", "false");
+      config.addEventListener("click", function (event) {
+        if (event.target.closest(".apd-config-panel")) return;
+        event.stopPropagation();
+        var opening = !controls.classList.contains("is-config-open");
+        controls.classList.toggle("is-config-open", opening);
+        config.setAttribute("aria-expanded", String(opening));
+        sizePlaybackControls(); art.controls.show = true;
+      });
+      config.addEventListener("keydown", function (event) {
+        if (event.target !== config) return;
+        if (event.key === "Enter" || event.key === " ") { event.preventDefault(); config.click(); }
+        if (event.key === "Escape") closeDanmakuSettings();
+      });
+    }
+    if (window.ResizeObserver) {
+      var observer = new ResizeObserver(sizePlaybackControls);
+      observer.observe(art.template.$controls);
+      art.on("destroy", function () { observer.disconnect(); });
+    }
+    sizePlaybackControls();
   }
 
   function updateTopbar() {
     if (!topbar) return;
+    updateRotateButton();
     var cv = document.getElementById("chipVideo");
     var cd = document.getElementById("chipDanmaku");
     var title = cv ? cv.textContent.replace(/^\s*🎬\s*/, "").split(" · ")[0] : "";
@@ -474,63 +629,74 @@
 
   function enterPlaying() {
     var art = window.Bplayer && window.Bplayer.art;
-    if (!art) return;
+    if (!matchesSource(art) || failedLoad || art.video.readyState < 2 || !art.video.videoWidth) return;
     var first = !playing;
-    playing = true;
+    playing = true; loading = false; clearTimeout(loadTimer);
+    if (loadPanel) loadPanel.hidden = true;
     document.body.classList.add("m-playing");
     if (home) home.classList.add("hide");
     if (topbar) topbar.classList.add("show");
     var pl = document.getElementById("playlist");
     if (pl) pl.classList.remove("open");
     openInfo(false);
-    setImmersive(true);
-    setLandscape(true);
+    setImmersive(true); setPlaybackActive(!art.video.paused);
+    setVideoOrientation(art.video.videoWidth, art.video.videoHeight);
+    window.AndroidGestures.setActive(true);
     updateTopbar();
     if (first) {
-      setTimeout(function () {
-        try { art.resize(); } catch (e) {}
-        window.dispatchEvent(new Event("resize"));
-      }, 80);
-      setTimeout(rememberCurrent, 600);
+      setTimeout(function () { try { art.resize(); } catch (e) {} }, 80);
+      rememberCurrent();
     }
   }
 
   function exitPlaying() {
-    playing = false;
+    closeDanmakuSettings();
+    playing = false; loading = false; failedLoad = false; requestedPath = ""; expectedUrl = ""; clearTimeout(loadTimer);
+    if (loadPanel) loadPanel.hidden = true;
+    if (window.__BplayerDesktop && window.__BplayerDesktop.cancelLoad) window.__BplayerDesktop.cancelLoad();
+    releaseVideo();
     document.body.classList.remove("m-playing");
     if (home) home.classList.remove("hide");
     if (topbar) topbar.classList.remove("show");
     openInfo(false);
-    setImmersive(false);
-    setLandscape(false);
-    try {
-      var art = window.Bplayer && window.Bplayer.art;
-      if (art) art.pause();
-    } catch (e) {}
+    setImmersive(false); setPlaybackActive(false); setVideoOrientation(0, 0);
+    window.AndroidGestures.setActive(false);
     renderRecent();
   }
 
-  function hookArt() {
-    setInterval(function () {
-      var art = window.Bplayer && window.Bplayer.art;
-      if (!art || art === hookedArt) return;
-      hookedArt = art;
-      art.on("control", function (show) {
-        if (topbar && playing) topbar.classList.toggle("show", !!show);
-      });
-      art.on("video:loadedmetadata", function () {
-        enterPlaying();
-        setTimeout(rememberCurrent, 500);
-      });
-      art.on("video:play", enterPlaying);
-      art.on("video:error", function () {
-        if (playing && !art.playing) {
-          // 解码失败时退回启动页，让用户换片
-          setTimeout(function () { if (!art.playing) exitPlaying(); }, 1200);
-        }
-      });
-    }, 400);
+  function attachArt(art) {
+    if (!art || art === hookedArt) return;
+    hookedArt = art; window.AndroidGestures.attach(art);
+    mountDanmakuControls(art);
+    art.on("control", function (show) {
+      var panelOpen = document.querySelector(".mDanControls.is-config-open");
+      if (!show && panelOpen && playing) { art.controls.show = true; return; }
+      if (topbar && playing) topbar.classList.toggle("show", !!show);
+      if (show) sizePlaybackControls();
+    });
+    art.on("video:loadedmetadata", function () {
+      if (matchesSource(art) && !failedLoad && art.video.videoWidth) setVideoOrientation(art.video.videoWidth, art.video.videoHeight);
+    });
+    art.on("video:loadeddata", enterPlaying);
+    art.on("video:canplay", enterPlaying);
+    art.on("video:playing", enterPlaying);
+    art.on("video:play", function () { if (matchesSource(art)) setPlaybackActive(true); });
+    art.on("video:pause", function () { if (matchesSource(art)) setPlaybackActive(false); });
+    art.on("video:ended", function () { if (matchesSource(art)) setPlaybackActive(false); });
+    art.on("video:error", function () {
+      if (matchesSource(art) && !failedLoad) failLoading("网络读取中断，或此视频编码不受当前内核支持。");
+    });
   }
+
+  function hookArt() {
+    setInterval(function () { attachArt(window.Bplayer && window.Bplayer.art); }, 400);
+  }
+
+  window.AndroidPlayback = {
+    begin: beginLoading, source: sourceLoading, attach: attachArt, fail: failLoading,
+    get loading() { return loading; },
+    get active() { return playing || loading; }
+  };
 
   function observeInfo() {
     var cv = document.getElementById("chipVideo");
@@ -556,7 +722,9 @@
       var p = document.getElementById(panels[i]);
       if (p && !p.hidden) { p.hidden = true; return true; }
     }
+    if (closeDanmakuSettings()) return true;
     if (window.AndroidFiles.back()) return true;
+    if (loading) { cancelLoading(); return true; }
     var pl = document.getElementById("playlist");
     if (pl && pl.classList.contains("open")) { pl.classList.remove("open"); return true; }
     if (playing) { exitPlaying(); return true; }
@@ -588,6 +756,12 @@
     polishSettings();
     hookArt();
     observeInfo();
+    window.addEventListener("resize", updateRotateButton);
+    document.addEventListener("click", function (event) {
+      if (!document.querySelector(".mDanControls.is-config-open") || event.target.closest(".mDanControls")) return;
+      closeDanmakuSettings();
+      if (!event.target.closest("button,.art-controls,#mTop,#mInfo")) event.stopPropagation();
+    }, true);
     // 不再锁定方向：旋转后重排播放器（启动页靠 CSS 自动切竖排）
     window.addEventListener("orientationchange", function () {
       setTimeout(function () {
@@ -599,20 +773,6 @@
         if (infoPanel && !infoPanel.hidden) fillInfo();
       }, 260);
     });
-    // 播放列表条目是动态生成的；点中后主动进播放页（同源切换不会触发 loadedmetadata）
-    document.addEventListener("click", function (e) {
-      var t = e.target;
-      while (t && t !== document && !(t.classList && t.classList.contains("pl-item"))) {
-        t = t.parentNode;
-      }
-      if (!t || t === document) return;
-      setTimeout(function () {
-        var art = window.Bplayer && window.Bplayer.art;
-        if (!art) return;
-        enterPlaying();
-        try { art.play(); } catch (err) {}
-      }, 200);
-    }, true);
   }
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", boot);

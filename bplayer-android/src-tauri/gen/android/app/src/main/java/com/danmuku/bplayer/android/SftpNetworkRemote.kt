@@ -22,6 +22,10 @@ internal class SftpNetworkRemote(private val source: NetworkSource) : NetworkRem
   private val ssh: SSHClient
   private val sftp: SFTPClient
   private val canonicalRoot: String
+  @Volatile private var closed = false
+
+  override fun isConnected(): Boolean = !closed && ssh.isConnected && ssh.isAuthenticated && ssh.transport.isRunning
+  override fun abort() { closed = true; runCatching { ssh.socket.close() } }
 
   init {
     prepareCrypto()
@@ -36,10 +40,10 @@ internal class SftpNetworkRemote(private val source: NetworkSource) : NetworkRem
         it.name == "ssh-ed25519" || it.name.startsWith("ecdsa-sha2-") || it.name == "rsa-sha2-256" || it.name == "rsa-sha2-512"
       }
       macFactories = macFactories.filter { it.name.startsWith("hmac-sha2-") }
-      timeoutMs = 20000
-      channelReadTimeoutMs = 20000
+      timeoutMs = 8000
+      channelReadTimeoutMs = 8000
     }
-    ssh = SSHClient(config).apply { connectTimeout = 10000; timeout = 20000 }
+    ssh = SSHClient(config).apply { connectTimeout = 8000; timeout = 8000 }
     var observed: String? = null
     var mismatch = false
     ssh.addHostKeyVerifier(object : HostKeyVerifier {
@@ -113,7 +117,7 @@ internal class SftpNetworkRemote(private val source: NetworkSource) : NetworkRem
     } catch (error: Exception) { file.close(); throw error }
   }
 
-  override fun close() { runCatching { sftp.close() }; runCatching { ssh.close() } }
+  override fun close() { abort(); runCatching { sftp.close() }; runCatching { ssh.close() } }
 
   companion object {
     @Synchronized

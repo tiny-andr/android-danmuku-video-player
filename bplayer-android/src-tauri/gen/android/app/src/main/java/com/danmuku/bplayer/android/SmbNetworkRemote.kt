@@ -27,6 +27,8 @@ internal class SmbNetworkRemote(private val source: NetworkSource) : NetworkRemo
   private val connection: Connection
   private val session: Session
   private val share: DiskShare
+  private val sockets = TimeoutSocketFactory()
+  @Volatile private var closed = false
   private val sharing = EnumSet.allOf(SMB2ShareAccess::class.java)
   private val noFollow = setOf(SMB2CreateOptions.FILE_OPEN_REPARSE_POINT)
   private val reparse = FileAttributes.FILE_ATTRIBUTE_REPARSE_POINT.value
@@ -36,8 +38,8 @@ internal class SmbNetworkRemote(private val source: NetworkSource) : NetworkRemo
       .withDialects(SMB2Dialect.SMB_3_1_1, SMB2Dialect.SMB_3_0_2, SMB2Dialect.SMB_3_0, SMB2Dialect.SMB_2_1)
       .withAuthenticators(NtlmAuthenticator.Factory())
       .withMultiProtocolNegotiate(false).withDfsEnabled(false).withSigningRequired(true).withEncryptData(false)
-      .withTimeout(20, TimeUnit.SECONDS).withSoTimeout(20000).withReadBufferSize(1024 * 1024)
-      .withSocketFactory(TimeoutSocketFactory()).build())
+      .withTimeout(8, TimeUnit.SECONDS).withSoTimeout(8000).withReadBufferSize(1024 * 1024)
+      .withSocketFactory(sockets).build())
     try {
       connection = client.connect(source.host, source.port)
       session = connection.authenticate(AuthenticationContext(source.username, source.password.toCharArray(), source.domain))
@@ -103,20 +105,27 @@ internal class SmbNetworkRemote(private val source: NetworkSource) : NetworkRemo
       }
       if (file.length != total) throw NetworkFailure("远端文件大小已改变，请重新打开视频")
       return java.io.BufferedInputStream(PositionedNetworkStream(start, length,
-        { position, buffer, offset, count -> file.read(buffer, position, offset, count) }, { file.close() }), 256 * 1024)
+        { position, buffer, offset, count -> file.read(buffer, position, offset, count) }, { file.closeNoWait() }), 256 * 1024)
     } catch (error: Exception) { file.close(); throw error }
   }
 
+  override fun isConnected(): Boolean = !closed && connection.isConnected && share.isConnected
+
+  override fun abort() { closed = true; sockets.closeAll() }
+
   override fun close() {
-    runCatching { share.close() }; runCatching { session.close() }
-    runCatching { connection.close() }; client.close()
+    abort()
+    runCatching { connection.close(true) }
+    client.close()
   }
 
   private class TimeoutSocketFactory : SocketFactory() {
+    private val opened = java.util.concurrent.ConcurrentHashMap.newKeySet<Socket>()
+    fun closeAll() { opened.forEach { runCatching { it.close() } }; opened.clear() }
     override fun createSocket(): Socket = object : Socket() {
       override fun connect(endpoint: SocketAddress?) { super.connect(endpoint, 10000) }
-      override fun connect(endpoint: SocketAddress?, timeout: Int) { super.connect(endpoint, if (timeout == 0) 10000 else minOf(timeout, 10000)) }
-    }
+      override fun connect(endpoint: SocketAddress?, timeout: Int) { super.connect(endpoint, if (timeout == 0) 8000 else minOf(timeout, 8000)) }
+    }.also { opened.add(it) }
     override fun createSocket(host: String, port: Int): Socket = createSocket().apply { connect(java.net.InetSocketAddress(host, port)) }
     override fun createSocket(host: String, port: Int, localHost: InetAddress, localPort: Int): Socket =
       createSocket().apply { bind(java.net.InetSocketAddress(localHost, localPort)); connect(java.net.InetSocketAddress(host, port)) }

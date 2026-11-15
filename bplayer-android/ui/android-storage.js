@@ -395,12 +395,13 @@
     }
     form.scrollTop = 0;
   }
-  async function open(value, startSection) {
+  async function open(value, startSection, startDir) {
     ensure(); if (resolvePicker) close(null);
     mode = value || "file"; mask.hidden = false;
     document.getElementById("aPickerTitle").textContent = mode === "dir" ? "选择文件夹" : "选择视频";
     var result = new Promise(function (resolve) { resolvePicker = resolve; });
-    if (startSection === "network") showSources(); else showLocal();
+    if (startDir) navigate(startDir);
+    else if (startSection === "network") showSources(); else showLocal();
     return result;
   }
   function close(value) {

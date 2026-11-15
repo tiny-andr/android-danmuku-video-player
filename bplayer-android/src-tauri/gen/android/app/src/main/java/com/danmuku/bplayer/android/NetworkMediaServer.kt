@@ -65,33 +65,32 @@ internal class NetworkMediaServer(
       return text(Response.Status.METHOD_NOT_ALLOWED, "媒体代理只允许读取").apply { addHeader("Allow", "HEAD, GET, OPTIONS") }
     }
     if (session.method == Method.OPTIONS) return cors(newFixedLengthResponse(Response.Status.NO_CONTENT, MIME_PLAINTEXT, ""))
-    var sourceId: String? = null
     try {
       val path = NetworkPaths.parse(String(Base64.decode(pieces[2], Base64.URL_SAFE or Base64.NO_WRAP), Charsets.UTF_8))
-      sourceId = path.id
       val source = store.get(path.id)
-      val remote = connections.get(source)
-      val stat = remote.stat(path.relative)
-      if (stat.kind != "file") return text(Response.Status.NOT_FOUND, "网络媒体文件不存在")
-      if (stat.size <= 0L) return text(Response.Status.RANGE_NOT_SATISFIABLE, "空文件不能作为媒体播放").apply {
-        addHeader("Content-Range", "bytes */0"); addHeader("Accept-Ranges", "bytes")
+      return connections.run(source, NetworkRole.MEDIA) { remote ->
+        val stat = remote.stat(path.relative)
+        if (stat.kind != "file") return@run text(Response.Status.NOT_FOUND, "网络媒体文件不存在")
+        if (stat.size <= 0L) return@run text(Response.Status.RANGE_NOT_SATISFIABLE, "空文件不能作为媒体播放").apply {
+          addHeader("Content-Range", "bytes */0"); addHeader("Accept-Ranges", "bytes")
+        }
+        val header = session.headers["range"]
+        val range = NetworkByteRange.parse(header, stat.size)
+        if (range == null) return@run text(Response.Status.RANGE_NOT_SATISFIABLE, "请求的媒体字节范围无效").apply {
+          addHeader("Content-Range", "bytes */${stat.size}"); addHeader("Accept-Ranges", "bytes")
+        }
+        val input = if (session.method == Method.HEAD || range.length == 0L) ByteArrayInputStream(ByteArray(0))
+          else track(path.id, connections.watch(source, NetworkRole.MEDIA, remote,
+            remote.open(path.relative, range.start, range.length, stat.size)))
+        val response = newFixedLengthResponse(if (header == null) Response.Status.OK else Response.Status.PARTIAL_CONTENT,
+          mime(path.relative), input, range.length)
+        response.setRequestMethod(session.method)
+        response.addHeader("Accept-Ranges", "bytes")
+        response.addHeader("Cache-Control", "no-store")
+        if (header != null) response.addHeader("Content-Range", "bytes ${range.start}-${range.end}/${stat.size}")
+        cors(response)
       }
-      val header = session.headers["range"]
-      val range = NetworkByteRange.parse(header, stat.size)
-      if (range == null) return text(Response.Status.RANGE_NOT_SATISFIABLE, "请求的媒体字节范围无效").apply {
-        addHeader("Content-Range", "bytes */${stat.size}"); addHeader("Accept-Ranges", "bytes")
-      }
-      val input = if (session.method == Method.HEAD || range.length == 0L) ByteArrayInputStream(ByteArray(0))
-        else track(path.id, remote.open(path.relative, range.start, range.length, stat.size))
-      val response = newFixedLengthResponse(if (header == null) Response.Status.OK else Response.Status.PARTIAL_CONTENT,
-        mime(path.relative), input, range.length)
-      response.setRequestMethod(session.method)
-      response.addHeader("Accept-Ranges", "bytes")
-      response.addHeader("Cache-Control", "no-store")
-      if (header != null) response.addHeader("Content-Range", "bytes ${range.start}-${range.end}/${stat.size}")
-      return cors(response)
     } catch (error: Exception) {
-      if (sourceId != null) connections.invalidate(sourceId)
       return text(Response.Status.SERVICE_UNAVAILABLE, safeNetworkError(error))
     }
   }
