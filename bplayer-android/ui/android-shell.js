@@ -64,6 +64,10 @@
       "box-shadow:0 12px 30px -12px rgba(251,114,153,.65);}" +
       ".mBrand h1{margin:0;font-size:25px;letter-spacing:.5px;color:#f2f5ff;}" +
       ".mBrand p{margin:3px 0 0;font-size:12.5px;color:#8b95ab;}" +
+      ".mHomeGear{margin-left:auto;flex:none;width:40px;height:40px;border-radius:50%;" +
+      "border:1px solid rgba(255,255,255,.1);background:rgba(255,255,255,.05);color:#aab3c6;" +
+      "font-size:17px;font-family:inherit;}" +
+      ".mHomeGear:active{background:rgba(251,114,153,.22);color:#fff;}" +
       ".mActions{display:flex;gap:12px;}" +
       ".mBtn{flex:1;min-width:0;min-height:66px;display:flex;flex-direction:column;justify-content:center;gap:3px;" +
       "padding:12px 16px;border-radius:14px;border:1px solid transparent;font-family:inherit;text-align:left;" +
@@ -410,7 +414,8 @@
       '<div class="mBody">' +
         '<div class="mLeft">' +
           '<div class="mBrand"><div class="mLogo">▶</div>' +
-            '<div><h1>Bplayer</h1><p>本地视频 · 弹幕播放器</p></div></div>' +
+            '<div><h1>Bplayer</h1><p>本地视频 · 弹幕播放器</p></div>' +
+            '<button type="button" class="mHomeGear" id="mHomeSettings" title="设置">⚙</button></div>' +
           '<div class="mActions">' +
             '<button type="button" id="mOpenVideo" class="mBtn mPrimary">' +
               '<b>选择视频</b><small>单个文件 · 自动配对同名弹幕</small></button>' +
@@ -437,6 +442,10 @@
     }
     document.getElementById("mOpenVideo").addEventListener("click", openVideo);
     document.getElementById("mOpenFolder").addEventListener("click", openFolder);
+    document.getElementById("mHomeSettings").addEventListener("click", function () {
+      var b = document.getElementById("btnSettings");
+      if (b) b.click();
+    });
     document.getElementById("mClearRecent").addEventListener("click", function () {
       writeRecent([]);
       renderRecent();
