@@ -467,6 +467,7 @@
   }
 
   function beginLoading(path, name) {
+    window.AndroidPlayerTools.begin(path);
     ensureLoadPanel(); clearTimeout(loadTimer);
     requestedPath = path; expectedUrl = ""; loading = true; failedLoad = false; playing = false;
     closeDanmakuSettings(); setVideoOrientation(0, 0);
@@ -499,6 +500,7 @@
     if (!requestedPath) return;
     ensureLoadPanel(); clearTimeout(loadTimer);
     loading = true; failedLoad = true; playing = false;
+    window.AndroidPlayerTools.finish();
     if (window.__BplayerDesktop && window.__BplayerDesktop.cancelLoad) window.__BplayerDesktop.cancelLoad();
     releaseVideo(); setPlaybackActive(false); window.AndroidGestures.setActive(false);
     loadPanel.hidden = false; loadPanel.classList.add("failed"); loadPanel.setAttribute("role", "alert");
@@ -543,6 +545,8 @@
     controls.classList.remove("is-config-open");
     var button = controls.querySelector(".apd-config");
     if (button) button.setAttribute("aria-expanded", "false");
+    var art = window.Bplayer && window.Bplayer.art;
+    if (window.AndroidPlayerTools) window.AndroidPlayerTools.onControls(art && art.controls.show);
     return true;
   }
 
@@ -582,6 +586,7 @@
         controls.classList.toggle("is-config-open", opening);
         config.setAttribute("aria-expanded", String(opening));
         sizePlaybackControls(); art.controls.show = true;
+        if (window.AndroidPlayerTools) window.AndroidPlayerTools.onControls(true);
       });
       config.addEventListener("keydown", function (event) {
         if (event.target !== config) return;
@@ -646,10 +651,12 @@
     if (first) {
       setTimeout(function () { try { art.resize(); } catch (e) {} }, 80);
       rememberCurrent();
+      window.AndroidPlayerTools.ready();
     }
   }
 
   function exitPlaying() {
+    window.AndroidPlayerTools.finish();
     closeDanmakuSettings();
     playing = false; loading = false; failedLoad = false; requestedPath = ""; expectedUrl = ""; clearTimeout(loadTimer);
     if (loadPanel) loadPanel.hidden = true;
@@ -667,8 +674,15 @@
   function attachArt(art) {
     if (!art || art === hookedArt) return;
     hookedArt = art; window.AndroidGestures.attach(art);
+    window.AndroidPlayerTools.attach(art);
     mountDanmakuControls(art);
     art.on("control", function (show) {
+      if (window.AndroidPlayerTools.locked || window.AndroidPlayerTools.resumePending) {
+        if (topbar) topbar.classList.remove("show");
+        window.AndroidPlayerTools.onControls(false);
+        return;
+      }
+      window.AndroidPlayerTools.onControls(show);
       var panelOpen = document.querySelector(".mDanControls.is-config-open");
       if (!show && panelOpen && playing) { art.controls.show = true; return; }
       if (topbar && playing) topbar.classList.toggle("show", !!show);
@@ -693,7 +707,7 @@
   }
 
   window.AndroidPlayback = {
-    begin: beginLoading, source: sourceLoading, attach: attachArt, fail: failLoading,
+    begin: beginLoading, source: sourceLoading, attach: attachArt, fail: failLoading, exit: exitPlaying,
     get loading() { return loading; },
     get active() { return playing || loading; }
   };
@@ -710,6 +724,7 @@
 
   /* 系统返回键：设置/信息卡/浮窗 → 文件浏览器 → 播放列表 → 播放页 → 退出应用 */
   window.__aAndroidBack = function () {
+    if (window.AndroidPlayerTools.back()) return true;
     var mask = document.getElementById("settingsMask");
     if (mask && !mask.hidden) {
       var sc = document.getElementById("settingsClose");
@@ -756,6 +771,13 @@
     polishSettings();
     hookArt();
     observeInfo();
+    window.addEventListener("android-touch-lock", function () {
+      closeDanmakuSettings(); openInfo(false);
+      ["audioPanel", "subtitlePanel", "densityPanel", "blockPanel"].forEach(function (id) {
+        var panel = document.getElementById(id); if (panel) panel.hidden = true;
+      });
+      var playlist = document.getElementById("playlist"); if (playlist) playlist.classList.remove("open");
+    });
     window.addEventListener("resize", updateRotateButton);
     document.addEventListener("click", function (event) {
       if (!document.querySelector(".mDanControls.is-config-open") || event.target.closest(".mDanControls")) return;

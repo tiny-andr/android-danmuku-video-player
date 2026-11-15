@@ -9,6 +9,12 @@
   var frame = null;
   var nextValue = null;
   var suppressClickUntil = 0;
+  var tap = null;
+
+  function clearTap() {
+    if (tap) clearTimeout(tap.timer);
+    tap = null;
+  }
 
   function ensureHud() {
     if (hud) return;
@@ -41,8 +47,9 @@
   }
   function eligible(target, point) {
     if (!active || !owner || !window.AndroidUI) return false;
-    if (document.querySelector('#settingsMask:not([hidden]),#mInfo:not([hidden]),#aFileMask:not([hidden]),.block-panel:not([hidden]),#playlist.open')) return false;
-    if (target.closest('button,input,select,textarea,a,.art-controls,.art-settings,.art-contextmenus,#mTop')) return false;
+    if (window.AndroidPlayerTools && (window.AndroidPlayerTools.locked || window.AndroidPlayerTools.resumePending)) return false;
+    if (document.querySelector('#settingsMask:not([hidden]),#mInfo:not([hidden]),#aFileMask:not([hidden]),#mResumePrompt:not([hidden]),.block-panel:not([hidden]),#playlist.open')) return false;
+    if (target.closest('button,input,select,textarea,a,.art-controls,.art-settings,.art-contextmenus,#mTop,#mPlayerActions,.apd-config-panel')) return false;
     return point.clientY > 52 && point.clientY < innerHeight - 62 && point.clientX > 12 && point.clientX < innerWidth - 12;
   }
   function start(event) {
@@ -52,7 +59,8 @@
     try { state = JSON.parse(window.AndroidUI.getPlaybackControls()); } catch (error) { return; }
     var touch = event.touches[0];
     gesture = {
-      id: touch.identifier, x: touch.clientX, y: touch.clientY,
+      id: touch.identifier, x: touch.clientX, y: touch.clientY, started: Date.now(),
+      zone: touch.clientX < innerWidth * 0.4 ? "left" : touch.clientX > innerWidth * 0.6 ? "right" : "center",
       kind: touch.clientX < innerWidth / 2 ? "brightness" : "volume",
       brightness: Number(state.brightness), volume: Number(state.volume),
       max: Number(state.maxVolume), min: Number(state.minVolume) || 0,
@@ -85,13 +93,27 @@
   }
   function end(event) {
     if (!gesture) return;
+    var finished = gesture;
     var handled = gesture.axis === "vertical";
     gesture = null;
     if (handled) {
+      clearTap();
       if (frame != null) { cancelAnimationFrame(frame); frame = null; }
       flush(); suppressClickUntil = Date.now() + 400;
       if (event) { event.preventDefault(); event.stopImmediatePropagation(); }
       hideTimer = setTimeout(function () { if (hud) hud.hidden = true; }, 700);
+    } else if (event && event.type === "touchend" && finished.axis === "pending" && finished.zone !== "center" && Date.now() - finished.started < 300) {
+      event.preventDefault(); event.stopImmediatePropagation(); suppressClickUntil = Date.now() + 400;
+      if (tap && tap.zone === finished.zone && Date.now() - tap.time < 320) {
+        clearTap();
+        if (window.AndroidPlayerTools) window.AndroidPlayerTools.seekBy(finished.zone === "left" ? -10 : 10);
+      } else {
+        clearTap();
+        tap = { zone: finished.zone, time: Date.now(), timer: setTimeout(function () {
+          tap = null;
+          if (active && owner && !(window.AndroidPlayerTools && (window.AndroidPlayerTools.locked || window.AndroidPlayerTools.resumePending))) owner.controls.show = !owner.controls.show;
+        }, 320) };
+      }
     }
   }
   function click(event) {
@@ -116,6 +138,7 @@
   function setActive(value) {
     active = !!value;
     if (!active) {
+      clearTap();
       gesture = null; nextValue = null; clearTimeout(hideTimer);
       if (frame != null) { cancelAnimationFrame(frame); frame = null; }
       if (hud) hud.hidden = true;

@@ -15,7 +15,9 @@ bplayer-android/
     index.html            主界面与播放逻辑
     android-shell.js      手机壳：启动页、播放页顶栏、信息卡、方向/沉浸式桥
     android-storage.js    文件浏览器、网络连接表单、存储命令路由
-    android-gestures.js   播放区域亮度/媒体音量垂直手势与 HUD
+    android-gestures.js   播放区域亮度/媒体音量、双击跳转与触摸锁仲裁
+    android-player-tools.js 续播、锁屏、适应/裁剪与原生音频会话接线
+    android-resume-store.js 断点记录的本地/网络路径存储
     vendor/               Artplayer、弹幕插件等
   src-tauri/
     src/lib.rs            Rust 命令（扫描目录、配对弹幕、读字幕、探测 MKV 音轨等）
@@ -40,6 +42,7 @@ research/
 - **网络存储**：`AndroidNetwork` 提供异步请求和流式媒体 URL；连接凭据使用 Android Keystore 加密，网页只接收公开字段。SMB 仅启用 2.1/3.x，WebDAV 仅 HTTPS，SFTP 必须核对主机指纹；禁止跳过证书或指纹校验。详细结构见 `research/network-storage.md`。
 - **方向策略**：Manifest 为 `user`。首页遵守系统旋转设置，禁止使用 `fullSensor` 绕过旋转锁。关闭系统自动旋转时播放保持当前方向；开启时，视频宽 > 高使用横屏，宽 ≤ 高使用竖屏。顶部“横屏／竖屏”是用户主动覆盖方向的入口，随控件显隐，不修改系统开关；退出或换片清除覆盖。等待真实视频尺寸后才选默认方向，退出播放恢复系统策略。
 - **播放控制栏**：弹幕插件通过 `mount()` 固定到 `.mDanControls`，不要让窄屏自动把工具栏移到画面底边。顶部不再重复放弹幕开关；横竖屏的底部开关和设置均保留，控制区使用高不透明黑色背景。
+- **播放会话**：系统音频焦点由 WebView/Chromium 唯一持有，禁止另起原生 `AudioFocusRequest` 与自身抢占。`AndroidPlaybackAudio` 只管理前台会话许可、耳机断开与后台暂停；中断后不自动恢复。续播使用稳定文件路径记录，弹出继续/从头选择；触摸锁下只保留解锁入口，禁止亮度、音量和跳转手势。
 - **安全区**：所有固定层用 `env(safe-area-inset-*)`，刘海/状态栏出现或沉浸式切换时自适应。
 - **移动端信息入口**：桌面底部信息条在手机上收进播放页顶栏的 `i` 信息卡（数据仍读 `#infoDuration` 等节点），卡内同时提供音轨、字幕、弹幕屏蔽、设置入口。音轨/字幕按钮沿用原逻辑的可用性：没有可选轨道时置灰。
 

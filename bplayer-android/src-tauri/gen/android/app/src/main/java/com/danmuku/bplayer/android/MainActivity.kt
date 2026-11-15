@@ -23,6 +23,7 @@ import androidx.core.view.WindowInsetsControllerCompat
 class MainActivity : TauriActivity() {
   private var webView: WebView? = null
   private var network: AndroidNetwork? = null
+  private var playbackAudio: PlaybackAudioFocus? = null
   private var immersive = false
   private var playbackShape = "home"
   private var playbackOrientationOverride = ""
@@ -105,6 +106,9 @@ class MainActivity : TauriActivity() {
     network?.close()
     network = AndroidNetwork(applicationContext, webView, ::ensureNetworkPermission)
     webView.addJavascriptInterface(network!!, "AndroidNetwork")
+    playbackAudio?.close()
+    playbackAudio = PlaybackAudioFocus(applicationContext, webView)
+    webView.addJavascriptInterface(playbackAudio!!, "AndroidPlaybackAudio")
     // 播放页 JS 通过它控制系统栏；只暴露两个最小能力。
     webView.addJavascriptInterface(object {
       @JavascriptInterface
@@ -168,11 +172,24 @@ class MainActivity : TauriActivity() {
     }, "AndroidUI")
   }
 
+  override fun onStart() {
+    super.onStart()
+    playbackAudio?.onStart()
+  }
+
+  override fun onStop() {
+    playbackAudio?.onStop()
+    super.onStop()
+  }
+
   override fun onDestroy() {
     contentResolver.unregisterContentObserver(rotationObserver)
     playbackBrightness = -1f
     window.attributes = window.attributes.apply { screenBrightness = -1f }
     webView?.removeJavascriptInterface("AndroidNetwork")
+    webView?.removeJavascriptInterface("AndroidPlaybackAudio")
+    playbackAudio?.close()
+    playbackAudio = null
     network?.close()
     network = null
     networkPermissionWaiters.clear()
