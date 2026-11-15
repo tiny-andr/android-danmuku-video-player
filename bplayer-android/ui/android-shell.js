@@ -7,19 +7,8 @@
 (function () {
   "use strict";
 
-  // 本脚本先于 Tauri 注入 window.__TAURI__ 执行，统一在调用时再取。
-  function origInvoke(cmd, args) {
-    return window.__TAURI__.core.invoke(cmd, args);
-  }
-
-  var VIDEO_RE = /\.(mp4|m4v|webm|mov|mkv|avi|ts|flv|wmv|mpg|mpeg)$/i;
-  var LAST_DIR_KEY = "bplayer.android.lastDir";
   var RECENT_KEY = "bplayer.android.recent.v1";
 
-  var overlay = null;
-  var resolver = null;
-  var mode = "file";
-  var cwd = "";
   var home = null;
   var topbar = null;
   var infoPanel = null;
@@ -31,14 +20,6 @@
     if (cls) e.className = cls;
     if (text != null) e.textContent = text;
     return e;
-  }
-
-  function fmtSize(n) {
-    if (!n) return "";
-    var u = ["B", "KB", "MB", "GB", "TB"];
-    var i = 0;
-    while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
-    return n.toFixed(n >= 10 || i === 0 ? 0 : 1) + " " + u[i];
   }
 
   /* ------------------------------------------------------------------ *
@@ -187,152 +168,17 @@
   /* ------------------------------------------------------------------ *
    * 文件浏览器
    * ------------------------------------------------------------------ */
-  function ensureOverlay() {
-    if (overlay) return overlay;
-    var style = el("style");
-    style.textContent =
-      "#aFileMask{position:fixed;inset:0;z-index:200000;background:rgba(0,0,0,.72);display:flex;" +
-      "align-items:stretch;justify-content:center;" +
-      "padding:calc(12px + env(safe-area-inset-top,0px)) calc(12px + env(safe-area-inset-right,0px)) " +
-      "calc(12px + env(safe-area-inset-bottom,0px)) calc(12px + env(safe-area-inset-left,0px));}" +
-      "#aFileMask[hidden]{display:none!important;}" +
-      "#aFileBox{display:flex;flex-direction:column;width:100%;max-width:860px;background:#101820;" +
-      "border:1px solid #2a3a48;border-radius:14px;overflow:hidden;color:#dce8f2;" +
-      "font:14px system-ui,'Noto Sans CJK SC',sans-serif;}" +
-      "#aFileHead{display:flex;gap:8px;align-items:center;padding:10px;background:#15212b;" +
-      "border-bottom:1px solid #223241;}" +
-      "#aFilePath{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" +
-      "font-family:ui-monospace,monospace;font-size:12px;color:#8fd3ff;}" +
-      "#aFileList{flex:1;overflow:auto;padding:6px;-webkit-overflow-scrolling:touch;}" +
-      ".aRow{display:flex;align-items:center;gap:10px;min-height:52px;padding:0 12px;border-radius:9px;cursor:pointer;}" +
-      ".aRow:active{background:#1d3142;}" +
-      ".aName{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}" +
-      ".aMeta{flex:none;font-size:12px;color:#7f97aa;}" +
-      ".aRow.dir .aName{color:#8fd3ff;}" +
-      "#aFileBar{display:flex;gap:8px;flex-wrap:wrap;padding:10px;background:#15212b;border-top:1px solid #223241;}" +
-      "#aFileBar button,#aFileHead button{min-height:44px;padding:0 14px;border-radius:9px;" +
-      "border:1px solid #2a3a48;background:#1a2836;color:#dce8f2;font-size:14px;font-family:inherit;}" +
-      "#aFileBar button:active,#aFileHead button:active{background:#274056;}";
-    document.head.appendChild(style);
-
-    overlay = el("div");
-    overlay.id = "aFileMask";
-    overlay.hidden = true;
-
-    var box = el("div");
-    box.id = "aFileBox";
-
-    var head = el("div");
-    head.id = "aFileHead";
-    var up = el("button", null, "↑ 上级");
-    var path = el("div", null, "");
-    path.id = "aFilePath";
-    var cancel = el("button", null, "取消");
-    head.appendChild(up);
-    head.appendChild(path);
-    head.appendChild(cancel);
-
-    var list = el("div");
-    list.id = "aFileList";
-
-    var bar = el("div");
-    bar.id = "aFileBar";
-    ["/sdcard/Download", "/sdcard", "/sdcard/Movies", "/storage/emulated/0"].forEach(function (p) {
-      var b = el("button", null, p.replace("/sdcard", "内部存储").replace("/storage/emulated/0", "存储根"));
-      b.addEventListener("click", function () { navigate(p); });
-      bar.appendChild(b);
-    });
-
-    box.appendChild(head);
-    box.appendChild(list);
-    box.appendChild(bar);
-    overlay.appendChild(box);
-
-    up.addEventListener("click", function () {
-      if (!cwd) return;
-      var parent = cwd.replace(/\/+$/, "").replace(/\/[^/]+$/, "");
-      if (!parent || parent === cwd) parent = "/sdcard";
-      navigate(parent);
-    });
-    cancel.addEventListener("click", function () { close(null); });
-    overlay.addEventListener("click", function (e) { if (e.target === overlay) close(null); });
-
-    document.body.appendChild(overlay);
-    return overlay;
-  }
-
-  function navigate(dir) {
-    if (!dir) return;
-    dir = String(dir).replace(/\\/g, "/");
-    if (dir.length > 1) dir = dir.replace(/\/+$/, "");
-    ensureOverlay();
-    var list = document.getElementById("aFileList");
-    list.textContent = "读取中…";
-    origInvoke("list_dir", { dir: dir }).then(function (res) {
-      cwd = res.dir || dir;
-      try { localStorage.setItem(LAST_DIR_KEY, cwd); } catch (e) {}
-      document.getElementById("aFilePath").textContent = cwd;
-      render(res.entries || []);
-    }).catch(function (e) {
-      list.textContent = "无法读取：" + e + "\n可点上方快捷路径重试。";
-    });
-  }
-
-  function render(entries) {
-    var list = document.getElementById("aFileList");
-    list.textContent = "";
-    var dirs = entries.filter(function (e) { return e.is_dir; });
-    var files = entries.filter(function (e) { return !e.is_dir && VIDEO_RE.test(e.name); });
-    dirs.sort(function (a, b) { return a.name.toLowerCase().localeCompare(b.name.toLowerCase()); });
-    files.sort(function (a, b) { return a.name.toLowerCase().localeCompare(b.name.toLowerCase()); });
-
-    if (!dirs.length && !files.length) {
-      list.appendChild(el("div", "aRow", "（此目录没有子文件夹或视频）"));
-    }
-    dirs.forEach(function (e) {
-      var row = el("div", "aRow dir");
-      row.appendChild(el("span", "aName", "📁 " + e.name));
-      row.addEventListener("click", function () { navigate(e.path); });
-      list.appendChild(row);
-    });
-    files.forEach(function (e) {
-      var row = el("div", "aRow");
-      row.appendChild(el("span", "aName", "🎬 " + e.name));
-      row.appendChild(el("span", "aMeta", fmtSize(e.size)));
-      row.addEventListener("click", function () {
-        if (mode === "dir") return; // 选目录模式下用底部按钮确认，避免误触
-        close(e.path);
-      });
-      list.appendChild(row);
-    });
-
-    var bar = document.getElementById("aFileBar");
-    var old = document.getElementById("aPickHere");
-    if (old) old.parentNode.removeChild(old);
-    if (mode === "dir") {
-      var pick = el("button", null, "选择当前文件夹");
-      pick.id = "aPickHere";
-      pick.style.borderColor = "#3d7ea6";
-      pick.addEventListener("click", function () { close(cwd); });
-      bar.insertBefore(pick, bar.firstChild);
-    }
+  function showStorageError(error) {
+    var toast = document.getElementById("toast");
+    if (!toast) return;
+    var text = document.getElementById("toastText");
+    if (text) text.textContent = "读取失败：" + (error.message || String(error));
+    toast.classList.add("show");
+    setTimeout(function () { toast.classList.remove("show"); }, 6000);
   }
 
   function openBrowser(m) {
-    mode = m || "file";
-    ensureOverlay();
-    overlay.hidden = false;
-    var start = "/sdcard/Download";
-    try { start = localStorage.getItem(LAST_DIR_KEY) || start; } catch (e) {}
-    navigate(start);
-    return new Promise(function (resolve) { resolver = resolve; });
-  }
-
-  function close(value) {
-    if (overlay) overlay.hidden = true;
-    var r = resolver;
-    resolver = null;
-    if (r) r(value || null);
+    return window.AndroidFiles.open(m);
   }
 
   /* ------------------------------------------------------------------ *
@@ -422,7 +268,9 @@
             '<button type="button" id="mOpenFolder" class="mBtn mSecondary">' +
               '<b>选择文件夹</b><small>整季连播 · 自动生成剧集列表</small></button>' +
           '</div>' +
-          '<p class="mHint">MP4 / MKV / HEVC · 同名弹幕与外挂字幕自动加载</p>' +
+          '<button type="button" id="mOpenNetwork" class="mBtn mSecondary">' +
+            '<b>网络存储</b><small>SMB / WebDAV / SFTP · 连接 NAS 与服务器</small></button>' +
+          '<p class="mHint">本地与网络视频 · 同名弹幕与外挂字幕自动加载</p>' +
         '</div>' +
         '<div class="mRight">' +
           '<div class="mRightHead"><h2>最近播放</h2>' +
@@ -442,6 +290,13 @@
     }
     document.getElementById("mOpenVideo").addEventListener("click", openVideo);
     document.getElementById("mOpenFolder").addEventListener("click", openFolder);
+    var networkButton = document.getElementById("mOpenNetwork");
+    networkButton.style.flex = "none";
+    networkButton.addEventListener("click", function () {
+      window.AndroidFiles.open("file", "network").then(function (path) {
+        if (path && window.__BplayerDesktop) return window.__BplayerDesktop.loadVideo(path, null);
+      }).catch(showStorageError);
+    });
     document.getElementById("mHomeSettings").addEventListener("click", function () {
       var b = document.getElementById("btnSettings");
       if (b) b.click();
@@ -607,12 +462,10 @@
     var v = art && art.video;
     var src = v && (v.currentSrc || v.src);
     if (!src) return;
-    var path = src;
-    try {
-      var u = new URL(src);
-      path = decodeURIComponent(u.pathname || "");
-    } catch (e) {
-      path = src.replace(/^https?:\/\/asset\.localhost/, "");
+    var path = window.__BplayerDesktop && window.__BplayerDesktop.currentPath;
+    if (!path) {
+      try { path = decodeURIComponent(new URL(src).pathname || ""); }
+      catch (e) { path = src.replace(/^https?:\/\/asset\.localhost/, ""); }
     }
     if (!path) return;
     var name = path.split("/").pop() || "";
@@ -703,7 +556,7 @@
       var p = document.getElementById(panels[i]);
       if (p && !p.hidden) { p.hidden = true; return true; }
     }
-    if (overlay && !overlay.hidden) { close(null); return true; }
+    if (window.AndroidFiles.back()) return true;
     var pl = document.getElementById("playlist");
     if (pl && pl.classList.contains("open")) { pl.classList.remove("open"); return true; }
     if (playing) { exitPlaying(); return true; }
@@ -772,6 +625,6 @@
   window.__aInvoke = function (cmd, args) {
     if (cmd === "pick_video") return openBrowser("file");
     if (cmd === "pick_folder") return openBrowser("dir");
-    return origInvoke(cmd, args);
+    return window.AndroidFiles.invoke(cmd, args);
   };
 })();

@@ -57,6 +57,10 @@ android {
     buildFeatures {
         buildConfig = true
     }
+    packaging {
+        resources.excludes += "META-INF/versions/9/OSGI-INF/MANIFEST.MF"
+        resources.merges += setOf("META-INF/LICENSE.md", "META-INF/NOTICE.md", "META-INF/LICENSE", "META-INF/NOTICE")
+    }
 }
 
 kotlin {
@@ -75,6 +79,12 @@ dependencies {
     implementation("androidx.activity:activity-ktx:1.10.1")
     implementation("com.google.android.material:material:1.12.0")
     implementation("androidx.lifecycle:lifecycle-process:2.10.0")
+    implementation("com.hierynomus:smbj:0.15.0")
+    implementation("com.hierynomus:sshj:0.41.2")
+    implementation("com.squareup.okhttp3:okhttp:4.12.1")
+    implementation("org.nanohttpd:nanohttpd:2.3.1")
+    implementation("org.bouncycastle:bcprov-jdk18on:1.85.2")
+    implementation("org.bouncycastle:bcpkix-jdk18on:1.85")
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.1.4")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.5.0")

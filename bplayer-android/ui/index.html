@@ -426,6 +426,7 @@
 <script src="vendor/artplayer.js"></script>
 <script src="vendor/artplayer-plugin-danmuku.js"></script>
 <script src="vendor/artplayer-plugin-audio-track.js"></script>
+<script src="android-storage.js"></script>
 <script src="android-shell.js"></script>
 <script>
 (function () {
@@ -1101,7 +1102,7 @@
     function pathName(p) { return String(p).replace(/\\/g, '/').split('/').pop(); }
     function pathDir(p) { return String(p).replace(/[\\/][^\\/]+$/, ''); }
     function normPath(p) { return String(p).replace(/\\/g, '/'); }
-    function mediaUrl(p) { return T.core.convertFileSrc(p); }
+    function mediaUrl(p) { return window.AndroidFiles.mediaUrl(p); }
 
     function renderPlaylist() {
       var ul = $('plList');
@@ -1849,11 +1850,21 @@
       });
     });
 
+    var videoLoadToken = 0;
     async function desktopLoadVideo(path, manualDanPath, epIndex) {
+      var token = ++videoLoadToken;
+      try { await loadVideoSource(path, manualDanPath, epIndex, token); }
+      catch (error) {
+        if (token === videoLoadToken) toast('读取失败：' + (error.message || String(error)), 7000);
+      }
+    }
+    async function loadVideoSource(path, manualDanPath, epIndex, token) {
       var name = pathName(path);
       var st = await invoke('fs_stat', { path: path });
+      if (token !== videoLoadToken) return;
       if (st.kind !== 'file') { toast('文件不存在：' + name); return; }
       currentVideoPath = normPath(path);
+      clearDanmaku();
       probeTracks = null;
       probeDurationUs = null;
       fullCacheActive = false;
@@ -1882,7 +1893,13 @@
       if (!/\.(mkv|mka|webm)$/i.test(name)) buildSubtitleMenu(path, null, ++probeToken);
       var dir = pathDir(path);
       if (epIndex == null) {
-        if (!playlist.length || playlistDir !== normPath(dir)) await loadPlaylist(dir, false);
+        if (!playlist.length || playlistDir !== normPath(dir)) {
+          var scan = await invoke('scan_folder', { dir: dir });
+          if (token !== videoLoadToken) return;
+          playlist = scan.episodes;
+          playlistDir = normPath(dir);
+          $('plTitle').textContent = '📂 ' + scan.label;
+        }
         epIndex = -1;
         for (var i = 0; i < playlist.length; i++) if (normPath(playlist[i].path) === normPath(path)) { epIndex = i; break; }
       }
@@ -1890,10 +1907,13 @@
       renderPlaylist();
       // 弹幕：手动拖入优先，否则零授权同名配对（直接打开 (AAC) 缓存时按原文件名配对）
       if (manualDanPath) {
-        desktopLoadDanmaku(pathName(manualDanPath), await invoke('read_text', { path: manualDanPath }));
+        var manualText = await invoke('read_text', { path: manualDanPath });
+        if (token !== videoLoadToken) return;
+        desktopLoadDanmaku(pathName(manualDanPath), manualText);
       } else {
         var pairPath = / \(AAC\)\.mkv$/i.test(name) ? path.replace(/ \(AAC\)\.mkv$/i, '.mkv') : path;
         var pair = await invoke('pair_danmaku', { videoPath: pairPath });
+        if (token !== videoLoadToken) return;
         if (pair) {
           desktopLoadDanmaku(pair.name, pair.text);
           toast('已自动加载同名弹幕：' + pair.name);
@@ -1905,6 +1925,7 @@
     }
     window.__BplayerDesktop = {
       loadVideo: desktopLoadVideo,
+      get currentPath() { return currentVideoPath; },
       // 拖入字幕的入口（拖放回调与外部调试共用）
       addSubtitle: addDroppedSubtitle,
       // 位图字幕调试入口：DevTools 里 `__BplayerDesktop.pgs` 可直接看索引/命中/缓存状态
@@ -1928,8 +1949,10 @@
       if (p) desktopLoadVideo(p, null);
     });
     $('btnOpenFolder').addEventListener('click', async function () {
-      var d = await invoke('pick_folder');
-      if (d) { await loadPlaylist(d, true); toast('已加载播放列表 · ' + playlist.length + ' 集'); }
+      try {
+        var d = await invoke('pick_folder');
+        if (d) { await loadPlaylist(d, true); toast('已加载播放列表 · ' + playlist.length + ' 集'); }
+      } catch (error) { toast('读取文件夹失败：' + (error.message || String(error)), 7000); }
     });
     $('btnPlaylist').addEventListener('click', function () { $('playlist').classList.toggle('open'); });
 

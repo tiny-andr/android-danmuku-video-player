@@ -1,0 +1,418 @@
+(function () {
+  "use strict";
+
+  var PREFIX = "/@network/";
+  var LAST_DIR = "bplayer.android.lastDir";
+  var VIDEO = /\.(mp4|m4v|webm|mov|mkv|avi|ts|flv|wmv|mpg|mpeg)$/i;
+  var pending = new Map();
+  var serial = 0;
+  var generation = 0;
+  var sources = [];
+  var mask, list, pathLabel, footer, shortcuts, form;
+  var cwd = "";
+  var requestedDir = "";
+  var mode = "file";
+  var resolvePicker = null;
+  var section = "local";
+  var editing = null;
+  var formVersion = 0;
+
+  function node(tag, cls, text) {
+    var element = document.createElement(tag);
+    if (cls) element.className = cls;
+    if (text != null) element.textContent = text;
+    return element;
+  }
+  function button(text, action, cls) {
+    var element = node("button", cls, text);
+    element.type = "button";
+    element.addEventListener("click", action);
+    return element;
+  }
+  function isNetwork(path) { return String(path || "").startsWith(PREFIX); }
+  function sourceFor(path) {
+    var id = String(path).slice(PREFIX.length).split("/")[0];
+    return sources.find(function (source) { return source.id === id; });
+  }
+  function rootFor(path) { return PREFIX + String(path).slice(PREFIX.length).split("/")[0]; }
+  function request(command, args) {
+    return new Promise(function (resolve, reject) {
+      if (!window.AndroidNetwork) { reject(new Error("网络存储桥未就绪，请重新打开应用")); return; }
+      var id = String(++serial);
+      var timeout = setTimeout(function () {
+        pending.delete(id);
+        reject(new Error("连接超时，请检查网络与服务器地址后重试"));
+      }, 90000);
+      pending.set(id, { resolve: resolve, reject: reject, timeout: timeout });
+      try { window.AndroidNetwork.request(id, command, JSON.stringify(args || {})); }
+      catch (error) { clearTimeout(timeout); pending.delete(id); reject(error); }
+    });
+  }
+  window.__aNetworkReply = function (id, envelope) {
+    var entry = pending.get(String(id));
+    if (!entry) return;
+    pending.delete(String(id));
+    clearTimeout(entry.timeout);
+    if (envelope.ok) entry.resolve(envelope.result);
+    else entry.reject(new Error(envelope.error || "网络读取失败"));
+  };
+  function invoke(command, args) {
+    args = args || {};
+    var path = args.path || args.videoPath || args.dir;
+    if (command.indexOf("network_") === 0) return request(command, args);
+    if (!isNetwork(path)) return window.__TAURI__.core.invoke(command, args);
+    if (command === "probe_mkv_tracks") return Promise.resolve({ tracks: [], duration_us: null });
+    if (command === "clean_sidecar_tmp") return Promise.resolve(0);
+    if (command === "sidecar_cache_files") return Promise.resolve([]);
+    if (["list_dir", "fs_stat", "read_text", "read_bytes", "scan_folder", "pair_danmaku", "scan_subtitles"].includes(command)) {
+      return request(command, args);
+    }
+    return Promise.reject(new Error("网络文件暂不支持此操作"));
+  }
+  function mediaUrl(path) {
+    if (isNetwork(path)) {
+      if (!window.AndroidNetwork) throw new Error("网络存储桥未就绪");
+      return window.AndroidNetwork.mediaUrl(path);
+    }
+    return window.__TAURI__.core.convertFileSrc(path);
+  }
+  function prettyPath(path) {
+    if (!isNetwork(path)) return path.replace(/^\/storage\/emulated\/0|^\/sdcard/, "手机存储");
+    var source = sourceFor(path);
+    return (source ? source.name : "网络存储") + (path.slice(rootFor(path).length) || " / ");
+  }
+  function sizeText(size) {
+    if (!size) return "";
+    var units = ["B", "KB", "MB", "GB", "TB"];
+    var index = 0;
+    while (size >= 1024 && index < units.length - 1) { size /= 1024; index++; }
+    return size.toFixed(index && size < 10 ? 1 : 0) + " " + units[index];
+  }
+  function ensure() {
+    if (mask) return;
+    var style = node("style");
+    style.textContent =
+      "#aFileMask{position:fixed;inset:0;z-index:200000;display:flex;justify-content:center;background:rgba(5,7,12,.9);padding:env(safe-area-inset-top,0px) env(safe-area-inset-right,0px) env(safe-area-inset-bottom,0px) env(safe-area-inset-left,0px);box-sizing:border-box}" +
+      "#aFileMask[hidden],#aFileMask [hidden]{display:none!important}" +
+      "#aFileBox{width:100%;max-width:860px;min-width:0;min-height:0;display:flex;flex-direction:column;color:#eef0fa;background:linear-gradient(150deg,#171925,#0e111a);font:14px system-ui,sans-serif}" +
+      "#aFileMask *{box-sizing:border-box}#aFileMask button,#aFileMask input,#aFileMask select{font:inherit}" +
+      "#aFileMask button{cursor:pointer;min-height:44px;border:1px solid #ffffff20;border-radius:12px;padding:9px 14px;color:inherit;background:#ffffff08}" +
+      "#aFileMask button:active{background:#ffffff20}#aFileMask button:disabled{opacity:.38;cursor:default}" +
+      "#aFileMask button:focus-visible,#aFileMask input:focus-visible,#aFileMask select:focus-visible{outline:2px solid #ac96ff;outline-offset:2px}" +
+      ".aTitleBar{display:flex;align-items:center;gap:12px;padding:14px 16px 8px}.aTitleBar h2{flex:1;margin:0;font-size:19px}.aIcon{width:44px;padding:0!important;font-size:20px!important}" +
+      ".aTabs{display:flex;gap:6px;margin:4px 16px 10px;padding:4px;background:#ffffff06;border-radius:15px}.aTabs button{flex:1;border-color:transparent!important;color:#929bb3!important}.aTabs button[aria-selected=true]{color:#f1eaff!important;background:#8b68ef30!important;border-color:#a184ed40!important}" +
+      "#aQuick{display:flex;gap:8px;overflow-x:auto;padding:0 16px 10px;flex-shrink:0}#aQuick button{white-space:nowrap;min-height:38px;font-size:12px;border-radius:20px}" +
+      "#aFileHead{display:flex;gap:8px;align-items:center;padding:8px 16px;border-top:1px solid #ffffff08;border-bottom:1px solid #ffffff08}" +
+      "#aFilePath{flex:1;min-width:0;color:#aeb8d4;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}" +
+      "#aFileList{flex:1;min-height:0;overflow:auto;overscroll-behavior:contain;padding:8px 10px;-webkit-overflow-scrolling:touch}" +
+      "#aFileMask .aRow{display:flex;align-items:center;gap:12px;width:100%;min-height:58px;padding:8px 12px;text-align:left;background:none;border:0;border-radius:12px}" +
+      ".aFileIcon{flex:none;width:36px;height:36px;border-radius:10px;display:grid;place-items:center;color:#bda6ff;background:#8b68ef18;font-size:18px}.aName{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.aMeta{font-size:12px;color:#7f8aa3;flex:none}.aArrow{color:#7f8aa3}" +
+      "#aFileBar{padding:12px 16px;border-top:1px solid #ffffff10;background:#151823}.aSelection{color:#b5bed5;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin:0 0 9px}#aPickHere{width:100%;font-weight:600;background:linear-gradient(110deg,#d25a87,#8061da)!important;border-color:transparent!important}" +
+      ".aStatus{padding:30px 14px;text-align:center;color:#8d99b3;line-height:1.7;white-space:pre-line;overflow-wrap:anywhere}.aStatus button{display:block;margin:16px auto 0}" +
+      ".aSource{display:flex;gap:8px;margin:6px 2px 10px;padding:10px;border:1px solid #ffffff12;border-radius:15px;background:#ffffff04}.aSource .aSourceOpen{flex:1;min-width:0;border:0!important;background:none!important;text-align:left;padding:4px!important}.aSource strong,.aSource small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.aSource small{color:#8d99b3;font-size:12px;margin-top:5px}.aSource .aEdit{font-size:12px;align-self:center}.aAdd{width:100%;border-style:dashed!important;color:#c6b4ff!important}.aNote{font-size:12px;color:#8894ad;line-height:1.65;margin:12px 8px}" +
+      "#aSourceForm{flex:1;min-height:0;overflow:auto;padding:8px 16px 16px}.aFormGrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.aField{display:flex;flex-direction:column;gap:6px;font-size:12px;color:#a9b4cd}.aField.wide{grid-column:1/-1}.aField input,.aField select{width:100%;min-height:46px;border:1px solid #ffffff20;border-radius:10px;padding:10px;background:#0c101b;color:#edf0fa;outline:none}.aField input::placeholder{color:#5e6a84;font-size:12px}.aField input[type=checkbox]{width:20px;min-height:20px;flex:none}.aFormActions{display:flex;gap:10px;margin-top:16px}.aFormActions button{flex:1}.aSave{background:#8b68ef44!important}.aDanger{color:#ff9caf!important}.aFormMessage{font-size:14px;line-height:1.7;white-space:pre-line;overflow-wrap:anywhere;margin:14px 0;padding:12px 14px;border:1px solid #8290b044;border-radius:12px;color:#c9d5ee;background:#8290b012}.aFormMessage:empty{display:none}.aFormMessage[data-kind=error]{border:2px solid #ff6d8d;color:#ffd5de;background:#ef426b24;font-weight:600}.aFormMessage[data-kind=success]{border-color:#64cda0;color:#b9f3d8;background:#64cda015}.aDiscovery{margin-top:10px;width:100%;color:#c6b4ff!important}.aDiscovered{margin-top:14px;padding-top:12px;border-top:1px solid #ffffff18}.aFingerprint{padding:12px;border:1px solid #a38cdd55;border-radius:12px;background:#8b68ef12}.aFingerprint code{display:block;word-break:break-all;user-select:text;font-size:12px;margin:8px 0}.aTrust{display:flex;gap:8px;align-items:flex-start;font-size:12px;line-height:1.6}.aTrust input{margin-top:3px}.aDangerConfirm{margin-top:12px;padding:12px;background:#f9779010;border-radius:12px}" +
+      "@media(min-width:900px){#aFileMask{padding-top:calc(10px + env(safe-area-inset-top,0px));padding-bottom:calc(10px + env(safe-area-inset-bottom,0px))}#aFileBox{border:1px solid #ffffff15;border-radius:20px}}" +
+      "@media(max-height:480px){.aTitleBar{padding-top:6px;padding-bottom:4px}.aTabs{margin-bottom:4px}.aTabs button{min-height:36px!important;padding:4px!important}#aQuick{padding-bottom:4px}#aFileHead{padding-top:4px;padding-bottom:4px}#aFileBar{padding-top:8px;padding-bottom:8px}}";
+    document.head.appendChild(style);
+    mask = node("div"); mask.id = "aFileMask"; mask.hidden = true;
+    mask.setAttribute("role", "dialog"); mask.setAttribute("aria-modal", "true"); mask.setAttribute("aria-labelledby", "aPickerTitle");
+    var box = node("div"); box.id = "aFileBox";
+    var title = node("div", "aTitleBar");
+    var heading = node("h2"); heading.id = "aPickerTitle";
+    var closeButton = button("×", function () { close(null); }, "aIcon");
+    closeButton.setAttribute("aria-label", "取消选择");
+    title.append(heading, closeButton);
+    var tabs = node("div", "aTabs"); tabs.setAttribute("role", "tablist");
+    var localTab = button("手机存储", function () { showLocal(); }); localTab.id = "aLocalTab";
+    var netTab = button("网络存储", function () { showSources(); }); netTab.id = "aNetworkTab";
+    [localTab, netTab].forEach(function (tab) { tab.setAttribute("role", "tab"); tabs.appendChild(tab); });
+    shortcuts = node("div"); shortcuts.id = "aQuick";
+    [["下载", "/sdcard/Download"], ["视频", "/sdcard/Movies"], ["内部存储", "/sdcard"]].forEach(function (item) {
+      shortcuts.appendChild(button(item[0], function () { navigate(item[1]); }));
+    });
+    var head = node("div"); head.id = "aFileHead";
+    var up = button("‹", goUp, "aIcon"); up.id = "aFileUp"; up.setAttribute("aria-label", "返回上一级");
+    pathLabel = node("div"); pathLabel.id = "aFilePath";
+    var refresh = button("↻", function () { if (requestedDir) navigate(requestedDir); else showSources(); }, "aIcon");
+    refresh.setAttribute("aria-label", "刷新目录");
+    head.append(up, pathLabel, refresh);
+    list = node("div"); list.id = "aFileList"; list.setAttribute("role", "region"); list.setAttribute("aria-label", "文件列表");
+    list.setAttribute("aria-live", "polite");
+    form = node("div"); form.id = "aSourceForm"; form.hidden = true;
+    footer = node("div"); footer.id = "aFileBar";
+    box.append(title, tabs, shortcuts, head, list, form, footer); mask.appendChild(box);
+    document.body.appendChild(mask);
+  }
+  function setSection(value) {
+    section = value;
+    document.getElementById("aLocalTab").setAttribute("aria-selected", String(value === "local"));
+    document.getElementById("aNetworkTab").setAttribute("aria-selected", String(value === "network"));
+    shortcuts.hidden = value !== "local";
+  }
+  function clearForm() {
+    formVersion++;
+    form.replaceChildren(); form.hidden = true; editing = null;
+    list.hidden = false;
+  }
+  function status(message, retry) {
+    list.replaceChildren();
+    var element = node("div", "aStatus", message);
+    if (retry) element.appendChild(button("重试", retry));
+    list.appendChild(element);
+  }
+  function updateFooter(ready) {
+    footer.replaceChildren();
+    footer.hidden = mode !== "dir" || !cwd || !form.hidden;
+    if (footer.hidden) return;
+    var name = ["/sdcard", "/storage/emulated/0"].includes(cwd) ? "手机存储" : cwd.split("/").pop();
+    if (isNetwork(cwd) && cwd === rootFor(cwd)) name = (sourceFor(cwd) || {}).name || "共享根目录";
+    footer.appendChild(node("p", "aSelection", "当前文件夹：" + name));
+    var pick = button("使用此文件夹", function () { if (!pick.disabled) close(cwd); });
+    pick.id = "aPickHere"; pick.disabled = !ready;
+    footer.appendChild(pick);
+  }
+  function showLocal() {
+    clearForm();
+    var start = "/sdcard/Download";
+    try { var last = localStorage.getItem(LAST_DIR); if (last && !isNetwork(last)) start = last; } catch (error) {}
+    navigate(start);
+  }
+  function goUp() {
+    if (!form.hidden) { showSources(); return; }
+    if (!cwd) { if (section === "network") showLocal(); return; }
+    if (isNetwork(cwd)) {
+      if (cwd === rootFor(cwd)) { showSources(); return; }
+      navigate(cwd.slice(0, cwd.lastIndexOf("/"))); return;
+    }
+    if (["/sdcard", "/storage/emulated/0", "/"].includes(cwd)) { showLocal(); return; }
+    navigate(cwd.replace(/\/[^/]+\/?$/, "") || "/sdcard");
+  }
+  async function navigate(dir) {
+    ensure(); clearForm();
+    var ticket = ++generation;
+    dir = String(dir).replace(/\\/g, "/").replace(/\/+$/, "") || "/";
+    requestedDir = dir;
+    setSection(isNetwork(dir) ? "network" : "local");
+    pathLabel.textContent = prettyPath(dir); pathLabel.title = pathLabel.textContent;
+    document.getElementById("aFileHead").hidden = false;
+    updateFooter(false); status("正在读取目录…");
+    try {
+      var result = await invoke("list_dir", { dir: dir });
+      if (ticket !== generation || mask.hidden) return;
+      cwd = result.dir || dir;
+      try { localStorage.setItem(LAST_DIR, cwd); } catch (error) {}
+      pathLabel.textContent = prettyPath(cwd); pathLabel.title = pathLabel.textContent;
+      renderEntries(result.entries || []); updateFooter(true);
+    } catch (error) {
+      if (ticket !== generation || mask.hidden) return;
+      cwd = ""; updateFooter(false);
+      status("无法读取目录\n" + (error.message || String(error)), function () { navigate(dir); });
+    }
+  }
+  function renderEntries(entries) {
+    list.replaceChildren(); list.scrollTop = 0;
+    entries = entries.filter(function (entry) { return entry.is_dir || VIDEO.test(entry.name); });
+    entries.sort(function (left, right) {
+      return Number(right.is_dir) - Number(left.is_dir) || left.name.localeCompare(right.name, "zh-CN", { numeric: true });
+    });
+    if (!entries.length) { status("此文件夹没有视频或子文件夹" + (mode === "dir" ? "\n仍可使用下方按钮选择它" : "")); return; }
+    entries.forEach(function (entry) {
+      var row = button("", function () { if (entry.is_dir) navigate(entry.path); else if (mode !== "dir") close(entry.path); }, "aRow");
+      row.appendChild(node("span", "aFileIcon", entry.is_dir ? "▰" : "▷"));
+      row.appendChild(node("span", "aName", entry.name)); row.title = entry.name;
+      row.appendChild(node("span", entry.is_dir ? "aArrow" : "aMeta", entry.is_dir ? "›" : sizeText(entry.size)));
+      if (!entry.is_dir && mode === "dir") row.disabled = true;
+      list.appendChild(row);
+    });
+  }
+  async function showSources() {
+    ensure(); clearForm(); var ticket = ++generation;
+    setSection("network"); cwd = ""; updateFooter(false);
+    document.getElementById("aFileHead").hidden = true;
+    status("正在读取已保存的连接…");
+    try {
+      sources = await request("network_sources");
+      if (ticket !== generation || mask.hidden) return;
+      list.replaceChildren(); list.scrollTop = 0;
+      sources.forEach(function (source) {
+        var card = node("div", "aSource");
+        var open = button("", function () { navigate(PREFIX + source.id); }, "aSourceOpen");
+        open.appendChild(node("strong", "", source.name));
+        open.appendChild(node("small", "", protocolName(source.protocol) + " · " + (source.protocol === "webdav" ? source.url : source.host + (source.share ? " / " + source.share : ""))));
+        card.append(open, button("编辑", function () { openForm(source); }, "aEdit")); list.appendChild(card);
+      });
+      list.appendChild(button("＋ 添加网络存储", function () { openForm(null); }, "aAdd"));
+      var found = node("div", "aDiscovered"); found.hidden = true;
+      var discover = button("⌕ 发现局域网 SMB", async function () {
+        if (discover.disabled) return;
+        discover.disabled = true; found.hidden = false; found.replaceChildren();
+        var progress = node("div", "aFormMessage", "正在发现局域网 SMB…\n约需 7 秒，请保持连接同一 Wi-Fi。");
+        found.appendChild(progress);
+        try {
+          var devices = await request("network_discover_smb");
+          if (ticket !== generation || mask.hidden) return;
+          found.replaceChildren();
+          found.appendChild(node("p", "aNote", devices.length ? "发现 " + devices.length + " 台设备，点击后填写共享名与账号。" : "没有发现设备。发现依赖服务器公告，同一网络的设备也可能不回应；仍可使用上方按钮填写 IP。"));
+          devices.forEach(function (device) {
+            var card = button("", function () {
+              openForm({ name: device.name || device.host, protocol: "smb", host: device.host, port: device.port || 445 });
+            }, "aRow");
+            card.appendChild(node("span", "aName", device.name || device.host));
+            card.appendChild(node("span", "aMeta", device.host)); found.appendChild(card);
+          });
+        } catch (error) {
+          if (ticket !== generation || mask.hidden) return;
+          progress.dataset.kind = "error"; progress.setAttribute("role", "alert");
+          progress.textContent = "⚠ 发现失败\n" + (error.message || String(error));
+        } finally { discover.disabled = false; }
+      }, "aDiscovery");
+      discover.id = "aDiscoverSmb"; list.append(discover, found);
+      list.appendChild(node("p", "aNote", "SMB 2.1 / 3 · HTTPS WebDAV · SFTP\n只读取文件，不修改服务器内容。连接信息加密保存在本机；视频按需读取，无需整片下载。"));
+    } catch (error) {
+      if (ticket !== generation || mask.hidden) return;
+      status(error.message, showSources);
+    }
+  }
+  function protocolName(protocol) { return { smb: "SMB", webdav: "WebDAV", sftp: "SFTP" }[protocol] || protocol; }
+  function openForm(source) {
+    ++generation; clearForm(); editing = source || {}; var version = formVersion;
+    var existing = !!(source && source.id);
+    setSection("network"); cwd = ""; list.hidden = true; form.hidden = false; footer.hidden = true;
+    document.getElementById("aFileHead").hidden = true;
+    form.appendChild(button("‹ 返回连接列表", showSources));
+    form.appendChild(node("h3", "", existing ? "编辑网络存储" : "添加网络存储"));
+    var grid = node("div", "aFormGrid"); form.appendChild(grid);
+    var fields = {};
+    function field(key, label, placeholder, wide, type) {
+      var wrapper = node("label", "aField" + (wide ? " wide" : ""));
+      wrapper.appendChild(node("span", "", label));
+      var input = node("input"); input.type = type || "text"; input.placeholder = placeholder || "";
+      input.value = editing[key] || ""; input.name = key; input.autocomplete = "off";
+      input.spellcheck = false; if (type === "number") { input.min = "1"; input.max = "65535"; input.inputMode = "numeric"; }
+      wrapper.appendChild(input); grid.appendChild(wrapper); fields[key] = input;
+      return wrapper;
+    }
+    var protocolWrapper = node("label", "aField wide"); protocolWrapper.appendChild(node("span", "", "连接协议"));
+    var protocol = node("select"); protocol.name = "protocol";
+    [["smb", "SMB 2.1 / 3（局域网共享）"], ["webdav", "WebDAV（HTTPS）"], ["sftp", "SFTP（SSH 2）"]].forEach(function (item) {
+      var option = node("option", "", item[1]); option.value = item[0]; protocol.appendChild(option);
+    });
+    protocol.value = editing.protocol || "smb"; protocolWrapper.appendChild(protocol); grid.appendChild(protocolWrapper);
+    field("name", "连接名称", "例如：家里的 NAS", true);
+    var host = field("host", "服务器地址", "IP 或主机名", false);
+    var port = field("port", "端口", "445", false, "number");
+    var url = field("url", "WebDAV 地址", "https://nas.example.com/dav/", true, "url");
+    var share = field("share", "共享名称", "例如：Videos（不是完整路径）", true);
+    var root = field("root", "起始文件夹（可选）", "留空从根目录浏览", true);
+    field("username", "用户名", "服务器用户名", false);
+    field("password", "密码", source && source.hasPassword ? "留空保留原密码" : "服务器密码", false, "password");
+    var domain = field("domain", "域（可选）", "一般留空", true);
+    var hint = node("p", "aNote"); form.appendChild(hint);
+    var fingerprint = node("div", "aFingerprint"); fingerprint.hidden = true;
+    fingerprint.appendChild(node("strong", "", "核对 SSH 服务器指纹"));
+    fingerprint.appendChild(node("p", "aNote", "请与服务器管理员提供的 SHA256 指纹核对。匹配后再勾选；不匹配不要保存。"));
+    var fingerprintValue = node("code"); fingerprint.appendChild(fingerprintValue);
+    var trustLabel = node("label", "aTrust"); var trust = node("input"); trust.type = "checkbox";
+    trustLabel.append(trust, node("span", "", "我已核对上述服务器指纹，确认匹配")); fingerprint.appendChild(trustLabel); form.appendChild(fingerprint);
+    var hostKey = editing.hostKey || "";
+    function updateProtocol(reset) {
+      var value = protocol.value;
+      host.hidden = port.hidden = value === "webdav"; url.hidden = value !== "webdav";
+      share.hidden = domain.hidden = value !== "smb"; root.hidden = value === "webdav";
+      if (reset) { fields.port.value = ""; hostKey = ""; trust.checked = false; fingerprint.hidden = true; }
+      fields.port.placeholder = value === "sftp" ? "22" : "445";
+      hint.textContent = value === "smb" ? "只协商 SMB 2.1 / 3，不支持 SMB1。建议使用只读账号，局域网或 VPN 内连接。" : value === "webdav" ? "仅接受 HTTPS，校验证书，不提供跳过证书校验。地址需指向支持列目录与 Range 的 WebDAV 服务。" : "使用 SSH 2 加密传输。首次连接必须核对服务器指纹；当前支持用户名和密码登录。";
+    }
+    protocol.addEventListener("change", function () { updateProtocol(true); }); updateProtocol(false);
+    [fields.host, fields.port].forEach(function (input) { input.addEventListener("input", function () { hostKey = ""; trust.checked = false; fingerprint.hidden = true; }); });
+    var message = node("div", "aFormMessage"); message.setAttribute("role", "status"); form.appendChild(message);
+    function showMessage(text, kind) {
+      message.dataset.kind = kind || "info";
+      message.setAttribute("role", kind === "error" ? "alert" : "status");
+      message.textContent = (kind === "error" ? "⚠ 连接失败\n" : kind === "success" ? "✓ " : "") + text;
+      message.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    }
+    var actions = node("div", "aFormActions"); var busy = false;
+    function config() {
+      var value = { id: editing.id || "", protocol: protocol.value };
+      Object.keys(fields).forEach(function (key) { value[key] = key === "password" ? fields[key].value : fields[key].value.trim(); });
+      value.port = value.port ? Number(value.port) : (value.protocol === "sftp" ? 22 : 445);
+      if (!value.name) throw new Error("请填写连接名称");
+      if (value.protocol === "webdav") {
+        if (!/^https:\/\//i.test(value.url)) throw new Error("WebDAV 地址必须以 https:// 开头");
+        value.root = "";
+      } else if (!value.host) throw new Error("请填写服务器地址");
+      if (value.protocol === "smb" && !value.share) throw new Error("请填写共享名称");
+      if (value.port < 1 || value.port > 65535 || !Number.isInteger(value.port)) throw new Error("端口必须是 1–65535 的整数");
+      if (value.protocol === "sftp") {
+        if (!fingerprint.hidden && !trust.checked) throw new Error("请先核对并确认服务器指纹");
+        value.hostKey = hostKey;
+      }
+      return value;
+    }
+    async function run(save) {
+      if (busy) return;
+      try {
+        var value = config(); busy = true; testButton.disabled = saveButton.disabled = true;
+        Array.from(grid.querySelectorAll("input,select")).forEach(function (input) { input.disabled = true; });
+        showMessage(save ? "正在验证并保存连接…" : "正在测试连接…");
+        var result = await request(save ? "network_save" : "network_test", { source: value });
+        if (version !== formVersion || mask.hidden) return;
+        if (result && result.fingerprintRequired) {
+          hostKey = result.hostKey; fingerprintValue.textContent = hostKey; fingerprint.hidden = false; trust.checked = false;
+          showMessage("已读取服务器指纹。请先核对，再点击测试或保存。");
+          fingerprint.scrollIntoView({ block: "nearest", behavior: "smooth" });
+          return;
+        }
+        if (save) { fields.password.value = ""; await showSources(); }
+        else showMessage("连接成功，可以浏览文件。点击“保存连接”后才会记住。", "success");
+      } catch (error) { if (version === formVersion && !mask.hidden) showMessage(error.message || String(error), "error"); }
+      finally {
+        busy = false;
+        if (version === formVersion) {
+          testButton.disabled = saveButton.disabled = false;
+          Array.from(grid.querySelectorAll("input,select")).forEach(function (input) { input.disabled = false; });
+        }
+      }
+    }
+    var testButton = button("测试连接", function () { run(false); });
+    var saveButton = button("保存连接", function () { run(true); }, "aSave");
+    actions.append(testButton, saveButton); form.appendChild(actions);
+    if (existing) {
+      var confirm = node("div", "aDangerConfirm"); confirm.hidden = true;
+      confirm.appendChild(node("p", "aNote", "只移除此设备保存的连接，不会删除服务器上的文件。"));
+      confirm.appendChild(button("确认移除连接", async function () {
+        if (busy) return;
+        busy = true; this.disabled = true;
+        try {
+          await request("network_remove", { id: source.id });
+          if (version === formVersion && !mask.hidden) await showSources();
+        } catch (error) { if (version === formVersion) { showMessage(error.message || String(error), "error"); this.disabled = false; } }
+        finally { busy = false; }
+      }, "aDanger"));
+      confirm.appendChild(button("取消", function () { confirm.hidden = true; }));
+      form.appendChild(button("移除此连接", function () { confirm.hidden = false; }, "aDanger")); form.appendChild(confirm);
+    }
+    form.scrollTop = 0;
+  }
+  async function open(value, startSection) {
+    ensure(); if (resolvePicker) close(null);
+    mode = value || "file"; mask.hidden = false;
+    document.getElementById("aPickerTitle").textContent = mode === "dir" ? "选择文件夹" : "选择视频";
+    var result = new Promise(function (resolve) { resolvePicker = resolve; });
+    if (startSection === "network") showSources(); else showLocal();
+    return result;
+  }
+  function close(value) {
+    ++generation;
+    if (mask) { mask.hidden = true; clearForm(); }
+    var resolve = resolvePicker; resolvePicker = null;
+    if (resolve) resolve(value || null);
+  }
+  function back() {
+    if (!mask || mask.hidden) return false;
+    if (!form.hidden) showSources(); else close(null);
+    return true;
+  }
+  window.AndroidFiles = { open: open, close: close, back: back, invoke: invoke, mediaUrl: mediaUrl, isNetwork: isNetwork };
+})();
