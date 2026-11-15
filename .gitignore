@@ -1,0 +1,24 @@
+# 依赖与构建产物
+bplayer-android/node_modules/
+bplayer-android/src-tauri/target/
+bplayer-android/src-tauri/gen/android/.gradle/
+bplayer-android/src-tauri/gen/android/build/
+bplayer-android/src-tauri/gen/android/app/build/
+bplayer-android/src-tauri/gen/android/local.properties
+bplayer-android/src-tauri/gen/android/app/src/main/jniLibs/
+
+# IDE
+.idea/
+*.iml
+
+# 日志与临时截图
+*.log
+probe/*.png
+probe/*.gradle
+build-*.log
+
+# 探针工程构建产物
+probe/app/build/
+probe/build/
+probe/.gradle/
+probe/local.properties

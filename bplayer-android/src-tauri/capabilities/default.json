@@ -1,0 +1,6 @@
+{
+  "identifier": "default",
+  "description": "Bplayer Android 探针权限",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

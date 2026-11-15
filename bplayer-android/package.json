@@ -1,0 +1,13 @@
+{
+  "name": "bplayer-android",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Bplayer Android 移植（Tauri 2）",
+  "scripts": {
+    "tauri": "tauri",
+    "android:build": "tauri android build --debug --apk -t aarch64"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.12.4"
+  }
+}

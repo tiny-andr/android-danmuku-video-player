@@ -1,0 +1,500 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Bplayer Android Probe</title>
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #000; color: #ddd; font: 12px/1.4 monospace; }
+  #v { display: block; width: 100vw; height: calc(100vh - 76px); object-fit: contain; background: #000; }
+  #bar { position: fixed; right: 6px; top: 6px; z-index: 20; }
+  #bar button { margin-left: 4px; padding: 5px 7px; font: 11px monospace; color: #ccc; background: #222; border: 1px solid #555; border-radius: 3px; }
+  #log { position: fixed; left: 0; right: 0; bottom: 0; height: 70px; margin: 0; padding: 4px 6px; overflow: auto; background: rgba(0,0,0,.78); color: #8cf; font-size: 10px; white-space: pre-wrap; }
+  #start { position: fixed; left: 0; right: 0; top: 40%; text-align: center; z-index: 30; display: none; }
+  #start button { padding: 12px 24px; font: 16px monospace; color: #fff; background: #0a4; border: 0; border-radius: 4px; }
+</style>
+</head>
+<body>
+<video id="v" playsinline webkit-playsinline crossorigin="anonymous" preload="auto"></video>
+<div id="bar">
+  <button id="fs">全屏</button>
+  <button id="pip">画中画</button>
+  <button id="wl">WakeLock</button>
+  <button id="orient">方向锁</button>
+  <button id="mkv">MKV</button>
+</div>
+<div id="start"><button id="startBtn">点击开始播放</button></div>
+<pre id="log"></pre>
+<script>
+(function () {
+  "use strict";
+
+  var V = document.getElementById('v');
+  var LOG = document.getElementById('log');
+  var VIDEO_PATH = Probe.videoPath();
+  var XML_PATH = Probe.xmlPath();
+  // 页面源 8765，媒体源 8766：刻意跨源，模拟 Tauri 的 tauri.localhost / asset.localhost。
+  var MEDIA_URL = 'http://127.0.0.1:8766/asset?path=' + encodeURIComponent(VIDEO_PATH);
+  var XML_URL = 'http://127.0.0.1:8766/file?path=' + encodeURIComponent(XML_PATH);
+
+  function send(kind, obj) {
+    var line = kind + ' ' + JSON.stringify(obj || {});
+    if (LOG.textContent.length > 24000) LOG.textContent = LOG.textContent.slice(-18000);
+    LOG.textContent += line + '\n';
+    LOG.scrollTop = LOG.scrollHeight;
+    try { Probe.log(line); } catch (e) { }
+  }
+
+  function hud(text) {
+    try { Probe.hud(text); } catch (e) { }
+  }
+
+  send('boot', {
+    video: VIDEO_PATH,
+    xml: XML_PATH,
+    allFiles: Probe.allFiles(),
+    ua: navigator.userAgent,
+    viewport: innerWidth + 'x' + innerHeight,
+    screen: screen.width + 'x' + screen.height,
+    dpr: devicePixelRatio,
+    cores: navigator.hardwareConcurrency || null,
+    memory: navigator.deviceMemory || null
+  });
+
+  // ---- 编解码能力 ----
+  var TYPES = [
+    'video/mp4; codecs="avc1.640028,mp4a.40.2"',
+    'video/mp4; codecs="hvc1.1.6.L123.B0,mp4a.40.2"',
+    'video/mp4; codecs="hvc1.2.4.L123.B0,mp4a.40.2"',
+    'video/mp4; codecs="av01.0.08M.08,mp4a.40.2"',
+    'video/x-matroska; codecs="avc1.640028,mp4a.40.2"',
+    'video/x-matroska; codecs="hvc1.1.6.L123.B0,mp4a.40.2"',
+    'video/webm; codecs="vp9,opus"',
+    'audio/mp4; codecs="mp4a.40.2"',
+    'audio/mp4; codecs="ec-3"',
+    'audio/mp4; codecs="ac-3"'
+  ];
+  var caps = {
+    fullscreenEnabled: !!document.fullscreenEnabled,
+    webkitFullscreenEnabled: !!document.webkitFullscreenEnabled,
+    pipEnabled: !!document.pictureInPictureEnabled,
+    pipFn: typeof V.requestPictureInPicture,
+    wakeLock: !!(navigator.wakeLock && navigator.wakeLock.request),
+    orientationLock: !!(screen.orientation && screen.orientation.lock),
+    mse: typeof MediaSource,
+    canPlay: {},
+    mseSupport: {}
+  };
+  for (var i = 0; i < TYPES.length; i++) {
+    caps.canPlay[TYPES[i]] = V.canPlayType(TYPES[i]);
+    try {
+      caps.mseSupport[TYPES[i]] = !!(window.MediaSource && MediaSource.isTypeSupported && MediaSource.isTypeSupported(TYPES[i]));
+    } catch (e) {
+      caps.mseSupport[TYPES[i]] = 'err';
+    }
+  }
+  send('caps', caps);
+
+  // ---- 视频事件 ----
+  var EVENTS = ['loadstart', 'loadedmetadata', 'loadeddata', 'canplay', 'canplaythrough',
+    'playing', 'pause', 'waiting', 'stalled', 'suspend', 'emptied', 'ended', 'seeked',
+    'enterpictureinpicture', 'leavepictureinpicture'];
+  EVENTS.forEach(function (ev) {
+    V.addEventListener(ev, function () {
+      send('ev', { e: ev, t: +V.currentTime.toFixed(2), rs: V.readyState, ns: V.networkState });
+    });
+  });
+  V.addEventListener('error', function () {
+    send('video-error', {
+      code: V.error && V.error.code,
+      msg: V.error && V.error.message,
+      src: V.currentSrc
+    });
+  });
+  V.addEventListener('loadedmetadata', function () {
+    send('metadata', {
+      duration: V.duration,
+      w: V.videoWidth,
+      h: V.videoHeight,
+      audioTracks: V.audioTracks ? V.audioTracks.length : null
+    });
+  });
+
+  // ---- 音频图：验证 CORS 污染是否让 WebAudio 变静音 ----
+  var actx = null, ana = null, gain = null;
+  function rms() {
+    if (!ana) return 0;
+    var a = new Float32Array(ana.fftSize);
+    ana.getFloatTimeDomainData(a);
+    var s = 0;
+    for (var i = 0; i < a.length; i++) s += a[i] * a[i];
+    return Math.sqrt(s / a.length);
+  }
+  function setupAudio() {
+    if (actx) return;
+    try {
+      var AC = window.AudioContext || window.webkitAudioContext;
+      actx = new AC();
+      var srcNode = actx.createMediaElementSource(V);
+      gain = actx.createGain();
+      gain.gain.value = 0;
+      ana = actx.createAnalyser();
+      ana.fftSize = 2048;
+      srcNode.connect(gain);
+      gain.connect(ana);
+      ana.connect(actx.destination);
+      if (actx.state === 'suspended') actx.resume();
+      send('audio-graph', {
+        state: actx.state,
+        sampleRate: actx.sampleRate,
+        channels: actx.destination.channelCount
+      });
+      setTimeout(function () {
+        send('rms-gain0', { rms: +rms().toFixed(5), ad: V.webkitAudioDecodedByteCount || 0 });
+        gain.gain.value = 1;
+        setTimeout(function () {
+          send('rms-gain1', {
+            rms: +rms().toFixed(5),
+            ad: V.webkitAudioDecodedByteCount || 0,
+            muted: V.muted,
+            volume: V.volume,
+            ctxState: actx.state
+          });
+        }, 3000);
+      }, 3000);
+    } catch (e) {
+      send('audio-graph-err', { name: e.name, msg: e.message });
+    }
+  }
+
+  // ---- 画面亮度：验证 crossOrigin 下 canvas 是否可读 ----
+  var cvs = document.createElement('canvas');
+  cvs.width = 64;
+  cvs.height = 36;
+  var cctx = cvs.getContext('2d', { willReadFrequently: true });
+  function luma() {
+    if (!V.videoWidth) return -1;
+    try {
+      cctx.drawImage(V, 0, 0, 64, 36);
+      var d = cctx.getImageData(0, 0, 64, 36).data;
+      var sum = 0;
+      for (var i = 0; i < d.length; i += 4) {
+        sum += 0.2126 * d[i] + 0.7152 * d[i + 1] + 0.0722 * d[i + 2];
+      }
+      return +(sum / (64 * 36)).toFixed(1);
+    } catch (e) {
+      send('canvas-tainted', { name: e.name, msg: e.message });
+      return -2;
+    }
+  }
+
+  // ---- 拖动：50% / 10% / 90%，逐个串行 ----
+  var runId = 0;
+  function seekTo(f, label, next) {
+    var myRun = runId;
+    var target = Math.max(0, (V.duration || 0) * f - 1);
+    var t0 = performance.now();
+    var done = false;
+    send('seek-start', { label: label, f: f, target: +target.toFixed(2) });
+    function onSeeked() {
+      if (done || myRun !== runId) return;
+      done = true;
+      V.removeEventListener('seeked', onSeeked);
+      send('seek-done', {
+        label: label,
+        to: +V.currentTime.toFixed(2),
+        ms: Math.round(performance.now() - t0),
+        rs: V.readyState
+      });
+      if (next) setTimeout(next, 1500);
+    }
+    V.addEventListener('seeked', onSeeked);
+    V.currentTime = target;
+    setTimeout(function () {
+      if (done || myRun !== runId) return;
+      done = true;
+      V.removeEventListener('seeked', onSeeked);
+      send('seek-timeout', { label: label, to: +V.currentTime.toFixed(2) });
+      if (next) setTimeout(next, 1500);
+    }, 10000);
+  }
+
+  var timedStarted = false;
+  function startTimedTests() {
+    if (timedStarted) return;
+    timedStarted = true;
+    var myRun = runId;
+    setTimeout(function () {
+      if (myRun !== runId) return;
+      send('luma-6s', { luma: luma(), t: +V.currentTime.toFixed(2) });
+    }, 6000);
+    setTimeout(function () {
+      if (myRun !== runId) return;
+      seekTo(0.5, 'mid', function () {
+        seekTo(0.1, 'near-start', function () {
+          seekTo(0.9, 'near-end', null);
+        });
+      });
+    }, 12000);
+  }
+
+  var firstPlaying = false;
+  V.addEventListener('playing', function () {
+    if (firstPlaying) return;
+    firstPlaying = true;
+    send('first-playing', { t: +V.currentTime.toFixed(2), muted: V.muted });
+    setupAudio();
+    setTimeout(function () {
+      V.muted = false;
+      send('unmute', { muted: V.muted, volume: V.volume });
+    }, 1500);
+    startTimedTests();
+  });
+
+  // ---- 每 3 秒状态 ----
+  setInterval(function () {
+    var q = V.getVideoPlaybackQuality ? V.getVideoPlaybackQuality() : null;
+    var b = V.buffered;
+    var be = b.length ? b.end(b.length - 1) : 0;
+    var st = {
+      t: +V.currentTime.toFixed(2),
+      dur: V.duration ? +V.duration.toFixed(2) : null,
+      rs: V.readyState,
+      ns: V.networkState,
+      w: V.videoWidth,
+      h: V.videoHeight,
+      ad: V.webkitAudioDecodedByteCount || 0,
+      vd: V.webkitVideoDecodedByteCount || 0,
+      drop: q ? q.droppedVideoFrames : null,
+      frames: q ? q.totalVideoFrames : null,
+      buf: +be.toFixed(1),
+      paused: V.paused
+    };
+    send('tick', st);
+    hud('t=' + st.t + '/' + (st.dur || '?') + '  ' + st.w + 'x' + st.h +
+      '  rs=' + st.rs + '  drop=' + st.drop + '  allFiles=' + Probe.allFiles());
+  }, 3000);
+
+  // ---- XML 解析（2.4MB / 2.3 万条）----
+  function parseXml() {
+    var t0 = performance.now();
+    fetch(XML_URL).then(function (r) {
+      send('xml-http', { status: r.status, len: r.headers.get('content-length') });
+      return r.text();
+    }).then(function (s) {
+      var fetchMs = Math.round(performance.now() - t0);
+      var t1 = performance.now();
+      var re = /<d\s+p="/g;
+      var count = 0;
+      while (re.exec(s)) count++;
+      var parseMs = Math.round(performance.now() - t1);
+      var sample = [];
+      var re2 = /p="([^"]+)"/g;
+      var m;
+      while ((m = re2.exec(s)) && sample.length < 5) sample.push(m[1]);
+      send('xml-ok', {
+        bytes: s.length,
+        count: count,
+        fetchMs: fetchMs,
+        parseMs: parseMs,
+        sample: sample
+      });
+      hud('xml ' + count + ' comments / ' + Math.round(s.length / 1024) + 'KB');
+    }).catch(function (e) {
+      send('xml-err', { name: e.name, msg: e.message });
+    });
+  }
+  setTimeout(parseXml, 2500);
+
+  // ---- 自动播放 ----
+  V.crossOrigin = 'anonymous'; // 必须在第一次设 src 之前
+  V.muted = true;
+  V.src = MEDIA_URL;
+  V.load();
+  var p = V.play();
+  if (p && p.catch) {
+    p.catch(function (e) {
+      send('autoplay-rejected', { name: e.name, msg: e.message });
+      document.getElementById('start').style.display = 'block';
+    });
+  }
+  document.getElementById('startBtn').onclick = function () {
+    document.getElementById('start').style.display = 'none';
+    V.play().catch(function (e) {
+      send('manual-play-err', { name: e.name, msg: e.message });
+    });
+  };
+
+  // ---- 切换片源（MKV / HEVC 10bit / DTS 直读测试）----
+  function playPath(path, label) {
+    runId++; // 让上一片源的定时 seek/luma 全部失效
+    send('switch', { label: label, path: path });
+    timedStarted = false;
+    firstPlaying = false;
+    V.pause();
+    V.removeAttribute('src');
+    V.load();
+    V.crossOrigin = 'anonymous';
+    V.muted = true;
+    V.src = 'http://127.0.0.1:8766/asset?path=' + encodeURIComponent(path);
+    V.load();
+    var p2 = V.play();
+    if (p2 && p2.catch) {
+      p2.catch(function (e) {
+        send('switch-play-err', { name: e.name, msg: e.message });
+      });
+    }
+    setTimeout(function () {
+      send('switch-state', {
+        label: label,
+        t: +V.currentTime.toFixed(2),
+        dur: V.duration ? +V.duration.toFixed(2) : null,
+        rs: V.readyState,
+        ns: V.networkState,
+        w: V.videoWidth,
+        h: V.videoHeight,
+        err: V.error ? { code: V.error.code, msg: V.error.message } : null,
+        ad: V.webkitAudioDecodedByteCount || 0,
+        vd: V.webkitVideoDecodedByteCount || 0,
+        luma: luma()
+      });
+    }, 8000);
+  }
+  document.getElementById('mkv').onclick = function () {
+    playPath(Probe.mkvPath(), 'pan-mkv');
+  };
+
+  // 外挂 AAC 音轨 + DTS 视频静音：验证 Bplayer 在安卓上的音频回退架构
+  function audioTest() {
+    playPath('/sdcard/Download/test-hevc10-dts.mkv', 'dts-video');
+    V.muted = true;
+    var a = new Audio();
+    a.crossOrigin = 'anonymous';
+    a.src = 'http://127.0.0.1:8766/asset?path=' + encodeURIComponent('/sdcard/Download/test-aac.m4a');
+    a.volume = 0.2;
+    var graph = null, analyser = null;
+    try {
+      var AC = window.AudioContext || window.webkitAudioContext;
+      graph = new AC();
+      var src = graph.createMediaElementSource(a);
+      analyser = graph.createAnalyser();
+      analyser.fftSize = 1024;
+      src.connect(analyser);
+      analyser.connect(graph.destination);
+      if (graph.state === 'suspended') graph.resume();
+    } catch (e) {
+      send('audio-test-graph-err', { name: e.name, msg: e.message });
+    }
+    a.play().then(function () {
+      send('audio-test-playing', {
+        t: a.currentTime, rs: a.readyState, ctx: graph ? graph.state : null
+      });
+    }).catch(function (e) {
+      send('audio-test-play-err', { name: e.name, msg: e.message });
+    });
+    setTimeout(function () {
+      var r = 0;
+      if (analyser) {
+        var arr = new Float32Array(analyser.fftSize);
+        analyser.getFloatTimeDomainData(arr);
+        var s = 0;
+        for (var i = 0; i < arr.length; i++) s += arr[i] * arr[i];
+        r = Math.sqrt(s / arr.length);
+      }
+      send('audio-test-state', {
+        t: +a.currentTime.toFixed(2),
+        rs: a.readyState,
+        err: a.error ? { code: a.error.code, msg: a.error.message } : null,
+        rms: +r.toFixed(5),
+        videoT: +V.currentTime.toFixed(2),
+        videoLuma: luma()
+      });
+      a.pause();
+    }, 6000);
+  }
+
+  // 供 CDP 调用的调试口
+  window.__probe = { video: V, playPath: playPath, send: send, luma: luma, audioTest: audioTest };
+
+  // ---- 能力按钮 ----
+  document.getElementById('fs').onclick = function () {
+    var el = document.documentElement;
+    var fn = el.requestFullscreen || el.webkitRequestFullscreen;
+    if (!fn) {
+      send('fs-no-api', {});
+      return;
+    }
+    try {
+      var r = fn.call(el);
+      if (r && r.then) {
+        r.then(function () { send('fs-ok', {}); }).catch(function (e) {
+          send('fs-err', { name: e.name, msg: e.message });
+        });
+      }
+    } catch (e) {
+      send('fs-throw', { name: e.name, msg: e.message });
+    }
+    setTimeout(function () {
+      send('fs-state', {
+        full: document.fullscreenElement !== null,
+        webkit: !!document.webkitFullscreenElement
+      });
+    }, 1500);
+  };
+
+  document.getElementById('pip').onclick = function () {
+    if (!V.requestPictureInPicture) {
+      send('pip-no-api', {});
+      return;
+    }
+    V.requestPictureInPicture().then(function () {
+      send('pip-ok', {});
+    }).catch(function (e) {
+      send('pip-err', { name: e.name, msg: e.message });
+    });
+  };
+
+  document.getElementById('wl').onclick = function () {
+    if (!navigator.wakeLock || !navigator.wakeLock.request) {
+      send('wl-no-api', {});
+      return;
+    }
+    navigator.wakeLock.request('screen').then(function (sentinel) {
+      send('wl-ok', { type: sentinel.type });
+      setTimeout(function () {
+        sentinel.release();
+        send('wl-released', {});
+      }, 5000);
+    }).catch(function (e) {
+      send('wl-err', { name: e.name, msg: e.message });
+    });
+  };
+
+  document.getElementById('orient').onclick = function () {
+    if (!screen.orientation || !screen.orientation.lock) {
+      send('orient-no-api', {});
+      return;
+    }
+    screen.orientation.lock('landscape').then(function () {
+      send('orient-ok', {});
+    }).catch(function (e) {
+      send('orient-err', { name: e.name, msg: e.message });
+    });
+  };
+
+  document.addEventListener('fullscreenchange', function () {
+    send('doc-fullscreenchange', { full: !!document.fullscreenElement });
+  });
+  document.addEventListener('webkitfullscreenchange', function () {
+    send('doc-webkitfullscreenchange', { full: !!document.webkitFullscreenElement });
+  });
+  document.addEventListener('visibilitychange', function () {
+    send('visibility', { state: document.visibilityState, t: +V.currentTime.toFixed(2) });
+  });
+  window.addEventListener('resize', function () {
+    send('resize', { w: innerWidth, h: innerHeight, dpr: devicePixelRatio });
+  });
+})();
+</script>
+</body>
+</html>
