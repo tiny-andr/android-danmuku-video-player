@@ -15,7 +15,7 @@
 3. **UI 层有三个 Android 特有的硬事实**，移植时必须改：
    - HTML5 `requestFullscreen()` 在 Wry 风格的 `onShowCustomView → onCustomViewHidden` 下**不可用**（`document.fullscreenElement` 仍是 true，但视口不扩大）；P2 改用「`.stage` fixed 铺满 + 原生 WindowInsetsController 隐藏系统栏」。
    - `requestPictureInPicture` 抛 `NotSupportedError`（`pipEnabled=false`），画中画按钮要隐藏。
-   - `screen.orientation.lock()` 抛 `NotSupportedError`；方向只能靠 Activity 的 `sensorLandscape` 或系统设置（P2 已固定横屏）。
+   - `screen.orientation.lock()` 抛 `NotSupportedError`；方向只能靠 Activity 的 `requestedOrientation`（P2 固定横屏；P2.5 改为首页 `fullSensor`、仅播放页锁横屏）。
    - 另：折叠屏横屏 CSS 视口为 **931×415**，原 `isMobile = clientWidth < 768` 判定为 **false**；P2 改为 `pointer: coarse` 并重写启动页/播放页/文件浏览器，不复用桌面布局。
 4. **存储模型可行**：`MANAGE_EXTERNAL_STORAGE` 经 `appops set --uid ... allow` 授予后，直接 `File` 访问 `/sdcard/Download` 读写、`read_dir`、`convertFileSrc` 都能用，不需要 SAF。侧载分发没有障碍。
 5. **剩余工程风险不在播放，在构建与后端**：
@@ -424,7 +424,7 @@ Android 的现实：
 | 页面 | 设计 |
 |---|---|
 | 启动页 | 品牌区 + 两个 66px 主按钮（选择视频 / 选择文件夹）+ 右侧「最近播放」（localStorage，最多 5 条，路径归一化去重） |
-| 播放页 | 视频 fixed 铺满，原生沉浸式隐藏状态栏/导航栏；顶部悬浮条：返回、标题（去扩展名）、弹幕数、弹幕开关、播放列表；随 Artplayer 控制栏自动显隐 |
+| 播放页 | 视频 fixed 铺满，原生沉浸式隐藏状态栏/导航栏；顶部悬浮条：返回、标题（去扩展名）、弹幕数、弹幕开关、信息卡、播放列表；随 Artplayer 控制栏自动显隐 |
 | 文件浏览器 | 全屏深色面板，52px 行高，快捷路径（Download / 内部存储 / Movies / 存储根） |
 | 播放列表 | 右侧 340px 抽屉，条目 44px，点击换集后自动进播放页并收起 |
 | 安全区 | 统一 `env(safe-area-inset-*)`；播放时 insets 由 39px 变 0，退出播放恢复，不写死 |
@@ -448,11 +448,18 @@ Android 的现实：
 - 修正 Bplayer 桌面版遗留：`.playlist` 是 `.wrap` 子元素，被 `rise` 动画的 `transform:none` 填充帧覆盖，抽屉永远展开；移动壳用 `!important` 压回。`.stage` 同理会成为 fixed 后代的包含块，播放全屏必须落在 `.stage` 并清掉 transform。
 - Artplayer `fullscreen/fullscreenWeb/autoOrientation/pip` 全关；`isMobile` 改为 `pointer: coarse` 或宽度 < 768。
 
-**6.8.4 P2 未做**
+**6.8.4 P2.5 手机界面第二轮**
+
+- 方向：Manifest 改 `fullSensor`，新增 `AndroidUI.setLandscape(bool)`（`requestedOrientation`），仅播放页锁横屏、退出立即恢复跟随系统；竖屏首页用 `@media (orientation:portrait)` 改成品牌/按钮在上、最近播放在下。
+- 信息条：桌面底部 `#infobar` 收进播放页顶栏的 `i` 信息卡，读取原 `#infoDuration/#infoRes/#infoSize/#infoCount/#infoParse/#infoTime`，卡内提供「音轨 / 字幕 / 弹幕屏蔽 / 设置」四个入口，转发到原 `#btnAudioEntry/#btnSubtitleEntry/#btnBlockEntry/#btnSettings`；无轨道时按钮置灰。
+- 浮窗：屏蔽/音轨/字幕/密度面板统一改底部浮层（12px 边距 + 安全区，z-index 100050），设置页改全宽模态（100070），返回键优先关闭。
+- 设置页隐藏 Windows 专用的「开机自动启动」，加注「转码待后续版本接入」；`optAutoAudio/optAutoSubtitle` 开关可见并可持久化，但 P3 前不会真正转码。
+
+**6.8.5 P2 未做**
 
 - 文件浏览器只列目录与视频，不单独选弹幕/字幕（依赖同目录自动配对）
 - 无「填充/裁剪」切换，超宽片源上下留黑
-- 只支持横屏（`sensorLandscape`），竖屏启动页未设计
+- 首页不再强制横屏（P2.5 已改为 `fullSensor`，播放页才锁横屏）
 - 转码、PGS、mkv_sub 仍是桩，遇到 DTS/位图字幕会提示待 P3
 
 ### 6.9 尚未验证（进入 P3）
@@ -490,7 +497,7 @@ Media3 混合方案（B 路线）在 P0 后被排除，仅当后续要求“上�
 | Tauri asset 1 MB Range 在大 MKV 上拖动慢 | 中 | 体验差 | P1 用真实工程复测；必要时在 Rust 侧调大 Range 上限 |
 | 触摸 UI 与 `isMobile` 判定 | **已解决** | — | 壳层改为 `pointer: coarse`，并重写启动页/播放页/文件浏览器；P4 只剩折叠屏适配 |
 | HTML5 全屏 / PiP 不可用 | **已解决** | — | 播放页 `.stage` fixed 铺满 + 原生沉浸式（`AndroidUI.setImmersive`）；PiP 关闭 |
-| 方向锁不可用 | **已绕过** | — | Activity `sensorLandscape` 固定横屏，播放页无需 JS 锁方向 |
+| 方向锁不可用 | **已绕过** | — | 首页 `fullSensor` 跟随系统；播放页经 `AndroidUI.setLandscape` 锁 `SENSOR_LANDSCAPE`，退出恢复 |
 | NDK / Rust Android target 缺失 | **当前事实** | P1 无法开始 | 安装 NDK 27 + `rustup target add aarch64-linux-android` |
 | ffmpeg 无法执行 | 中 | 音轨/字幕兜底失效 | jniLibs 打包；前台服务保活；备选 Media3 FFmpeg 扩展 |
 | 折叠屏/旋转导致 PGS 错位 | 中 | 字幕错位 | 监听 resize/orientation，重算覆盖层布局 |
