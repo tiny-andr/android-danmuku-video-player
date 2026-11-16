@@ -378,6 +378,11 @@
       </div>
 
       <div class="settings-row">
+        <label><input type="checkbox" id="optKeepScreenOn" /> 播放时保持屏幕亮屏</label>
+        <div class="settings-desc">防止播放页自动熄屏；关闭后遵循系统熄屏时间。退出播放或切到后台后不再保持常亮。</div>
+      </div>
+
+      <div class="settings-row">
         <label><input type="checkbox" id="optAutoAudio" /> 自动转换不支持的音轨</label>
         <div class="settings-desc">开片时若音轨内核解不了（DTS / TrueHD / AC-4 等），后台转成 AAC 外挂音轨。关闭后不自动转，需要在「音轨」菜单里点那条轨道才开始。</div>
       </div>
@@ -396,6 +401,9 @@
 <script src="vendor/artplayer.js"></script>
 <script src="vendor/artplayer-plugin-danmuku.js"></script>
 <script src="vendor/artplayer-plugin-audio-track.js"></script>
+<script src="android-navigation.js"></script>
+<script src="android-file-order.js"></script>
+<script src="android-thumbnails.js"></script>
 <script src="android-storage.js"></script>
 <script src="android-resume-store.js"></script>
 <script src="android-player-tools.js"></script>
@@ -421,7 +429,7 @@
   /* ---- 应用设置（齿轮页）：音轨自动转换默认开，字幕默认关 ---- */
   var SETTINGS_KEY = 'bplayer_settings';
   var SETTINGS_VER = 2; // 1.2.6 起音轨自动转换改为默认开启；旧存档没有版本号，一律按新默认走一次
-  var appSettings = { autoAudio: true, autoSubtitle: false };
+  var appSettings = { autoAudio: true, autoSubtitle: false, keepScreenOn: true };
 
   function loadAppSettings() {
     try {
@@ -429,6 +437,7 @@
       if (c.ver !== SETTINGS_VER) return; // 旧版存档：沿用新的默认值
       appSettings.autoAudio = !!c.autoAudio;
       appSettings.autoSubtitle = !!c.autoSubtitle;
+      appSettings.keepScreenOn = c.keepScreenOn !== false;
     } catch (e) { /* 配置损坏按默认值 */ }
   }
 
@@ -437,12 +446,20 @@
       localStorage.setItem(SETTINGS_KEY, JSON.stringify({
         autoAudio: appSettings.autoAudio,
         autoSubtitle: appSettings.autoSubtitle,
+        keepScreenOn: appSettings.keepScreenOn,
         ver: SETTINGS_VER,
       }));
     } catch (e) { /* 忽略持久化失败 */ }
   }
 
+  function applyKeepScreenOn() {
+    if (window.AndroidUI && window.AndroidUI.setKeepScreenOn) {
+      window.AndroidUI.setKeepScreenOn(appSettings.keepScreenOn);
+    }
+  }
+
   loadAppSettings();
+  applyKeepScreenOn();
   // Android/触屏没有鼠标，宽度也不再能区分设备（Magic V2 横屏 CSS 视口 931px）。
   // 用 pointer: coarse 判定移动端，宽度判断保留给桌面窄窗口。
   var isMobile = document.documentElement.clientWidth < 768 ||
@@ -887,26 +904,24 @@
   // 这几个浮窗都固定在右上角同一个位置（right:16px; bottom:64px），同时只能开一个，
   // 否则点完字幕再点音轨就会叠在一起。
   function closeOtherPanels(keepId) {
-    ['audioPanel', 'subtitlePanel', 'densityPanel', 'blockPanel'].forEach(function (id) {
-      if (id === keepId) return;
-      var el = $(id);
-      if (el) el.hidden = true;
-    });
+    if (keepId) window.AndroidNavigation.open(keepId);
+    else window.AndroidNavigation.clear();
   }
+
+  function closePanel(id) { window.AndroidNavigation.close(id); }
 
   function bindBlockPanel() {
     var panel = $('blockPanel');
     $('btnBlockEntry').addEventListener('click', function () {
       var opening = panel.hidden;
-      closeOtherPanels(opening ? 'blockPanel' : '');
-      panel.hidden = !opening;
+      if (opening) closeOtherPanels('blockPanel'); else closePanel('blockPanel');
       if (opening) {
         $('blockEnabled').checked = blockState.enabled;
         $('blockWords').value = blockState.words;
         updateBlockMeta();
       }
     });
-    $('blockClose').addEventListener('click', function () { panel.hidden = true; });
+    $('blockClose').addEventListener('click', function () { closePanel('blockPanel'); });
     $('blockEnabled').addEventListener('change', function () {
       blockState.enabled = this.checked;
       applyBlockSettings();
@@ -920,7 +935,7 @@
       }, 400);
     });
     document.addEventListener('keydown', function (e) {
-      if (e.key === 'Escape') panel.hidden = true;
+      if (e.key === 'Escape' && window.AndroidNavigation.top === 'blockPanel') closePanel('blockPanel');
     });
   }
   /* ------------------------------------------------------------------ *
@@ -1023,8 +1038,7 @@
   function toggleDensityPanel() {
     var panel = $('densityPanel');
     var opening = panel.hidden;
-    closeOtherPanels(opening ? 'densityPanel' : '');
-    panel.hidden = !opening;
+    if (opening) closeOtherPanels('densityPanel'); else closePanel('densityPanel');
     if (opening) updateDensityMeta();
   }
 
@@ -1054,7 +1068,7 @@
   }
 
   function bindDensityPanel() {
-    $('densityClose').addEventListener('click', function () { $('densityPanel').hidden = true; });
+    $('densityClose').addEventListener('click', function () { closePanel('densityPanel'); });
     // 拖动时只更新文案，松手（change）才重建队列，避免一次拖动装十几次弹幕
     $('densityRange').addEventListener('input', function () {
       var v = DENSITY_STEPS[Number(this.value)];
@@ -1064,7 +1078,7 @@
     });
     $('densityRange').addEventListener('change', function () { applyDensitySettings(); });
     document.addEventListener('keydown', function (e) {
-      if (e.key === 'Escape') $('densityPanel').hidden = true;
+      if (e.key === 'Escape' && window.AndroidNavigation.top === 'densityPanel') closePanel('densityPanel');
     });
   }
   /* ------------------------------------------------------------------ *
@@ -1076,6 +1090,9 @@
     var T = window.__TAURI__;
     var invoke = window.__aInvoke || T.core.invoke;
     var playlist = [], playlistDir = '', currentEpIndex = -1;
+    var folderEntry = false, folderOrigin = null;
+    var playlistGeneration = 0;
+    var navigation = window.AndroidNavigation;
 
     function pathName(p) { return String(p).replace(/\\/g, '/').split('/').pop(); }
     function pathDir(p) { return String(p).replace(/[\\/][^\\/]+$/, ''); }
@@ -1084,6 +1101,7 @@
 
     function renderPlaylist() {
       var ul = $('plList');
+      var position = navigation.captureScroll(ul);
       ul.innerHTML = '';
       if (!playlist.length) {
         ul.innerHTML = '<li class="pl-empty">点「选择文件夹」生成剧集列表<br/>播放中可在这里快速换集</li>';
@@ -1091,6 +1109,7 @@
       playlist.forEach(function (ep, i) {
         var li = document.createElement('li');
         li.className = 'pl-item' + (i === currentEpIndex ? ' current' : '');
+        li.dataset.path = ep.path;
         li.title = ep.name + (ep.danmaku ? ' · ' + ep.danmaku : ' · 无同名弹幕');
         var nm = document.createElement('span');
         nm.className = 'pl-name';
@@ -1102,20 +1121,62 @@
           bd.textContent = '弹幕';
           li.appendChild(bd);
         }
-        li.addEventListener('click', function () { desktopLoadVideo(ep.path, null, i); });
+        li.addEventListener('click', function () {
+          var origin = folderEntry ? { type: 'playlist', snapshot: playlistSnapshot() } : null;
+          if (origin) origin.snapshot.index = i;
+          desktopLoadVideo(ep.path, null, i, origin);
+        });
         ul.appendChild(li);
       });
       $('plCount').textContent = playlist.length ? playlist.length + ' 集' : '';
+      navigation.restoreScroll(ul, position);
     }
 
-    async function loadPlaylist(dir, open) {
-      var scan = await invoke('scan_folder', { dir: dir });
-      playlist = scan.episodes;
-      playlistDir = normPath(dir);
-      $('plTitle').textContent = '📂 ' + scan.label;
-      renderPlaylist();
-      if (open) $('playlist').classList.add('open');
-      return scan;
+    function playlistSnapshot() {
+      return { episodes: playlist.map(function (episode) { return Object.assign({}, episode); }), dir: playlistDir,
+        title: $('plTitle').textContent, index: currentEpIndex, position: navigation.captureScroll($('plList')), origin: folderOrigin };
+    }
+
+    function restorePlaylist(snapshot) {
+      playlistGeneration++;
+      playlist = snapshot.episodes; playlistDir = snapshot.dir; currentEpIndex = snapshot.index;
+      folderOrigin = snapshot.origin; folderEntry = true;
+      $('plTitle').textContent = snapshot.title; renderPlaylist();
+      navigation.open('playlist'); navigation.restoreScroll($('plList'), snapshot.position);
+    }
+
+    function selectionOrigin(path) {
+      var snapshot = window.AndroidFiles.takeSelection(path);
+      return snapshot ? { type: 'browser', snapshot: snapshot } : null;
+    }
+
+    async function loadPlaylist(dir, open, origin) {
+      var playlistTicket = ++playlistGeneration;
+      origin = origin || selectionOrigin(dir) || window.AndroidPlayback.homeOrigin();
+      var task = navigation.task(function () { window.AndroidPlayback.restoreOrigin(origin); });
+      try {
+        var scan = await invoke('scan_folder', { dir: dir });
+        if (!task.valid() || playlistTicket !== playlistGeneration) { task.finish(); return null; }
+        task.finish();
+        playlist = scan.episodes;
+        playlistDir = normPath(dir); currentEpIndex = -1;
+        folderOrigin = origin; folderEntry = true;
+        $('plTitle').textContent = '📂 ' + scan.label;
+        renderPlaylist(); $('plList').scrollTop = 0;
+        if (open) navigation.open('playlist');
+        return scan;
+      } catch (error) {
+        if (!task.valid()) return null;
+        task.finish(); window.AndroidPlayback.restoreOrigin(origin);
+        throw error;
+      }
+    }
+
+    async function openFolder(dir) {
+      try {
+        var scan = await loadPlaylist(dir, true);
+        if (scan) toast('已加载播放列表 · ' + scan.episodes.length + ' 集');
+      } catch (error) { toast('读取文件夹失败：' + (error.message || String(error)), 7000); }
     }
 
     function desktopLoadDanmaku(name, text) {
@@ -1135,6 +1196,7 @@
     var probeToken = 0;
     var transcodeVideo = '';    // 正在转换的源视频（归一化路径）
     var transcodeOrdinal = -1;  // 正在转换的音轨序号（1-based）
+    var currentVideoStat = null;
     var currentVideoPath = '';  // 当前播放的源视频（归一化路径）
     var externalOrdinal = -1;   // 当前挂载的外挂音轨序号；-1 = 无
     var probeTracks = null;     // 最近一次探测的音轨列表（仅 audio）
@@ -1376,7 +1438,7 @@
       var panel = $('audioPanel');
       if (fullCacheActive || !hasDeadAudio() || !probeTracks || !probeTracks.length) {
         btn.hidden = true;
-        panel.hidden = true;
+        closePanel('audioPanel');
         return;
       }
       btn.hidden = false;
@@ -1401,7 +1463,7 @@
 
     function switchAudioTrack(i) {
       if (fullCacheActive || !hasDeadAudio() || !probeTracks || !probeTracks[i] || !currentVideoPath) return;
-      $('audioPanel').hidden = true;
+      closePanel('audioPanel');
       if (externalOrdinal === i + 1) return;
       var t = probeTracks[i];
       var label = codecName(String(t.codec || '').toUpperCase()) || '未知编码';
@@ -1474,7 +1536,7 @@
       var panel = $('subtitlePanel');
       if (!subItems.length) {
         btn.hidden = true;
-        panel.hidden = true;
+        closePanel('subtitlePanel');
         return;
       }
       btn.hidden = false;
@@ -1514,7 +1576,7 @@
 
     function mountSubtitle(s, silent) {
       if (s.disabled || !currentVideoPath) return;
-      $('subtitlePanel').hidden = true;
+      closePanel('subtitlePanel');
       if (s.kind === 'bitmap') { mountPgsSubtitle(s, silent); return; }
       unmountPgs(); // 从位图字幕切到文本字幕：收起图像层
       if (s.kind === 'ext') {
@@ -1787,7 +1849,7 @@
 
     function unmountSubtitle() {
       mountedSubId = '';
-      $('subtitlePanel').hidden = true;
+      closePanel('subtitlePanel');
       unmountPgs();
       if (art) art.subtitle.style({ display: 'none' });
       refreshSubtitleMenu();
@@ -1829,11 +1891,14 @@
     });
 
     var videoLoadToken = 0;
-    async function desktopLoadVideo(path, manualDanPath, epIndex) {
+    async function desktopLoadVideo(path, manualDanPath, epIndex, origin) {
+      origin = origin || selectionOrigin(path);
+      folderEntry = false;
       var token = ++videoLoadToken;
+      var playlistTicket = ++playlistGeneration;
       hideToast();
-      if (window.AndroidPlayback) window.AndroidPlayback.begin(path, pathName(path));
-      try { await loadVideoSource(path, manualDanPath, epIndex, token); }
+      if (window.AndroidPlayback) window.AndroidPlayback.begin(path, pathName(path), origin);
+      try { await loadVideoSource(path, manualDanPath, epIndex, token, playlistTicket); }
       catch (error) {
         if (token === videoLoadToken) {
           if (window.AndroidPlayback) window.AndroidPlayback.fail(error.message || String(error));
@@ -1841,12 +1906,13 @@
         }
       }
     }
-    async function loadVideoSource(path, manualDanPath, epIndex, token) {
+    async function loadVideoSource(path, manualDanPath, epIndex, token, playlistTicket) {
       var name = pathName(path);
       var st = await invoke('fs_stat', { path: path });
       if (token !== videoLoadToken) return;
       if (st.kind !== 'file') throw new Error('文件不存在：' + name);
       currentVideoPath = normPath(path);
+      currentVideoStat = { size: st.size, modified_ms: st.modified_ms };
       clearDanmaku();
       probeTracks = null;
       probeDurationUs = null;
@@ -1874,28 +1940,32 @@
       handleAudioCodecs(path, name);
       // 外挂字幕扫描对全部视频类型生效（内嵌轨只有 MKV 能探测，由 handleAudioCodecs 补齐）
       if (!/\.(mkv|mka|webm)$/i.test(name)) buildSubtitleMenu(path, null, ++probeToken);
-      loadVideoSidecars(path, manualDanPath, epIndex, token).catch(function (error) {
+      loadVideoSidecars(path, manualDanPath, epIndex, token, playlistTicket).catch(function (error) {
         if (token !== videoLoadToken) return;
         chipDanmaku.textContent = '💬 附件读取失败';
         if (!window.AndroidPlayback || !window.AndroidPlayback.loading) toast('视频已打开，附件读取失败：' + (error.message || String(error)), 6000);
       });
     }
-    async function loadVideoSidecars(path, manualDanPath, epIndex, token) {
+    async function loadVideoSidecars(path, manualDanPath, epIndex, token, playlistTicket) {
       var name = pathName(path);
       var dir = pathDir(path);
-      if (epIndex == null) {
+      if (playlistTicket === playlistGeneration && epIndex == null) {
         if (!playlist.length || playlistDir !== normPath(dir)) {
           var scan = await invoke('scan_folder', { dir: dir });
           if (token !== videoLoadToken) return;
-          playlist = scan.episodes;
-          playlistDir = normPath(dir);
-          $('plTitle').textContent = '📂 ' + scan.label;
+          if (playlistTicket === playlistGeneration) {
+            playlist = scan.episodes;
+            playlistDir = normPath(dir);
+            $('plTitle').textContent = '📂 ' + scan.label;
+          }
         }
         epIndex = -1;
         for (var i = 0; i < playlist.length; i++) if (normPath(playlist[i].path) === normPath(path)) { epIndex = i; break; }
       }
-      currentEpIndex = epIndex;
-      renderPlaylist();
+      if (playlistTicket === playlistGeneration) {
+        currentEpIndex = epIndex;
+        renderPlaylist();
+      }
       // 弹幕：手动拖入优先，否则零授权同名配对（直接打开 (AAC) 缓存时按原文件名配对）
       if (manualDanPath) {
         var manualText = await invoke('read_text', { path: manualDanPath });
@@ -1916,8 +1986,15 @@
     }
     window.__BplayerDesktop = {
       loadVideo: desktopLoadVideo,
+      openFolder: openFolder, restorePlaylist: restorePlaylist,
+      playlistClosed: function () {
+        if (folderEntry && !window.AndroidPlayback.active) {
+          folderEntry = false; window.AndroidPlayback.restoreOrigin(folderOrigin);
+        }
+      },
       cancelLoad: function () { videoLoadToken++; probeToken++; danmakuLoadToken++; },
       get currentPath() { return currentVideoPath; },
+      get currentStat() { return currentVideoStat ? Object.assign({}, currentVideoStat) : null; },
       // 拖入字幕的入口（拖放回调与外部调试共用）
       addSubtitle: addDroppedSubtitle,
       // 位图字幕调试入口：DevTools 里 `__BplayerDesktop.pgs` 可直接看索引/命中/缓存状态
@@ -1941,26 +2018,26 @@
       if (p) desktopLoadVideo(p, null);
     });
     $('btnOpenFolder').addEventListener('click', async function () {
-      try {
-        var d = await invoke('pick_folder');
-        if (d) { await loadPlaylist(d, true); toast('已加载播放列表 · ' + playlist.length + ' 集'); }
-      } catch (error) { toast('读取文件夹失败：' + (error.message || String(error)), 7000); }
+      var d = await invoke('pick_folder');
+      if (d) await openFolder(d);
     });
-    $('btnPlaylist').addEventListener('click', function () { $('playlist').classList.toggle('open'); });
+    $('btnPlaylist').addEventListener('click', function () {
+      if (navigation.top === 'playlist') navigation.close('playlist'); else navigation.open('playlist');
+    });
 
   // ---- 设置页 ----
   function openSettings() {
     hideToast(); // 设置页是模态，压在它上面的提示先收掉，免得挡住内容
-    closeOtherPanels(''); // 右侧浮窗也收掉，别从模态后面露出来
-    $('settingsMask').hidden = false;
+    window.AndroidNavigation.open('settingsMask');
     $('optAutoAudio').checked = appSettings.autoAudio;
     $('optAutoSubtitle').checked = appSettings.autoSubtitle;
+    $('optKeepScreenOn').checked = appSettings.keepScreenOn;
     invoke('get_autostart').then(function (on) {
       $('optAutostart').checked = !!on;
     }).catch(function () { $('optAutostart').checked = false; });
   }
 
-  function closeSettings() { $('settingsMask').hidden = true; }
+  function closeSettings() { closePanel('settingsMask'); }
 
   $('btnSettings').addEventListener('click', openSettings);
   $('settingsClose').addEventListener('click', closeSettings);
@@ -1968,7 +2045,7 @@
     if (ev.target === $('settingsMask')) closeSettings();
   });
   document.addEventListener('keydown', function (ev) {
-    if (ev.key === 'Escape' && !$('settingsMask').hidden) closeSettings();
+    if (ev.key === 'Escape' && window.AndroidNavigation.top === 'settingsMask') closeSettings();
   });
 
   $('optAutostart').addEventListener('change', function () {
@@ -1982,6 +2059,12 @@
     });
   });
 
+  $('optKeepScreenOn').addEventListener('change', function () {
+    appSettings.keepScreenOn = this.checked;
+    saveAppSettings();
+    applyKeepScreenOn();
+  });
+
   $('optAutoAudio').addEventListener('change', function () {
     appSettings.autoAudio = this.checked;
     saveAppSettings();
@@ -1993,21 +2076,19 @@
     saveAppSettings();
     toast(this.checked ? '已开启：自动转换内嵌字幕' : '已关闭：内嵌字幕需在「字幕」菜单里手动选择');
   });
-    $('plClose').addEventListener('click', function () { $('playlist').classList.remove('open'); });
+    $('plClose').addEventListener('click', function () { navigation.close('playlist'); });
     $('btnAudioEntry').addEventListener('click', function () {
       var panel = $('audioPanel');
       var opening = panel.hidden;
-      closeOtherPanels(opening ? 'audioPanel' : '');
-      panel.hidden = !opening;
+      if (opening) closeOtherPanels('audioPanel'); else closePanel('audioPanel');
     });
-    $('audioClose').addEventListener('click', function () { $('audioPanel').hidden = true; });
+    $('audioClose').addEventListener('click', function () { closePanel('audioPanel'); });
     $('btnSubtitleEntry').addEventListener('click', function () {
       var panel = $('subtitlePanel');
       var opening = panel.hidden;
-      closeOtherPanels(opening ? 'subtitlePanel' : '');
-      panel.hidden = !opening;
+      if (opening) closeOtherPanels('subtitlePanel'); else closePanel('subtitlePanel');
     });
-    $('subtitleClose').addEventListener('click', function () { $('subtitlePanel').hidden = true; });
+    $('subtitleClose').addEventListener('click', function () { closePanel('subtitlePanel'); });
 
     // 播完自动下一集
     window.__BplayerNext = function () {
@@ -2029,7 +2110,7 @@
       var st = await invoke('fs_stat', { path: paths[0] });
       if (st.kind === 'dir') {
         var scan = await loadPlaylist(paths[0], true);
-        toast('已加载播放列表「' + scan.label + '」· ' + playlist.length + ' 集');
+        if (scan) toast('已加载播放列表「' + scan.label + '」· ' + playlist.length + ' 集');
         return;
       }
       var video = null, dan = null, sub = null;

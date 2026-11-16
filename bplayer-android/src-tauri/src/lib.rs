@@ -240,6 +240,7 @@ struct DirEntryInfo {
     path: String,
     size: u64,
     is_dir: bool,
+    modified_ms: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -271,8 +272,11 @@ fn list_dir(dir: String) -> Result<DirListing, String> {
         entries.push(DirEntryInfo {
             name,
             path: path.to_string_lossy().to_string(),
-            size: meta.map(|m| m.len()).unwrap_or(0),
+            size: meta.as_ref().map(|m| m.len()).unwrap_or(0),
             is_dir,
+            modified_ms: meta.and_then(|m| m.modified().ok())
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .and_then(|elapsed| u64::try_from(elapsed.as_millis()).ok()),
         });
     }
     Ok(DirListing {

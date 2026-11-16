@@ -75,10 +75,10 @@ internal class WebDavNetworkRemote(private val source: NetworkSource) : NetworkR
     if (!response.isSuccessful) throw NetworkFailure("WebDAV 服务器读取失败，请检查路径与服务状态")
   }
 
-  private data class DavEntry(val url: HttpUrl, val directory: Boolean, val size: Long)
+  private data class DavEntry(val url: HttpUrl, val directory: Boolean, val size: Long, val modifiedMs: Long?)
 
   private fun propfind(target: HttpUrl, depth: String): List<DavEntry> {
-    val xml = "<?xml version=\"1.0\" encoding=\"utf-8\"?><d:propfind xmlns:d=\"DAV:\"><d:prop><d:resourcetype/><d:getcontentlength/></d:prop></d:propfind>"
+    val xml = "<?xml version=\"1.0\" encoding=\"utf-8\"?><d:propfind xmlns:d=\"DAV:\"><d:prop><d:resourcetype/><d:getcontentlength/><d:getlastmodified/></d:prop></d:propfind>"
     val request = builder(target).header("Depth", depth)
       .method("PROPFIND", xml.toRequestBody("application/xml; charset=utf-8".toMediaType())).build()
     return client.newCall(request).execute().use { response ->
@@ -118,6 +118,9 @@ internal class WebDavNetworkRemote(private val source: NetworkSource) : NetworkR
     var valid = false
     var propDirectory = false
     var propSize = -1L
+    var modifiedMs: Long? = null
+    var propModifiedMs: Long? = null
+    val dateFormat = java.text.SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss zzz", java.util.Locale.US).apply { isLenient = false }
     var field: String? = null
     val text = StringBuilder()
     while (true) {
@@ -128,10 +131,10 @@ internal class WebDavNetworkRemote(private val source: NetworkSource) : NetworkR
           if (parser.depth > 32) throw NetworkFailure("WebDAV XML 嵌套层级过深")
           if (parser.namespace == "DAV:") {
             when (parser.name) {
-              "response" -> { href = ""; valid = false; directory = false; size = -1 }
-              "propstat" -> { status = ""; propDirectory = false; propSize = -1 }
+              "response" -> { href = ""; valid = false; directory = false; size = -1; modifiedMs = null }
+              "propstat" -> { status = ""; propDirectory = false; propSize = -1; propModifiedMs = null }
               "collection" -> propDirectory = true
-              "href", "status", "getcontentlength" -> { field = parser.name; text.setLength(0) }
+              "href", "status", "getcontentlength", "getlastmodified" -> { field = parser.name; text.setLength(0) }
             }
           }
         }
@@ -148,15 +151,17 @@ internal class WebDavNetworkRemote(private val source: NetworkSource) : NetworkR
               "href" -> href = text.toString().trim()
               "status" -> status = text.toString().trim()
               "getcontentlength" -> propSize = text.toString().trim().toLongOrNull() ?: -1
+              "getlastmodified" -> propModifiedMs = runCatching { dateFormat.parse(text.toString().trim())?.time?.takeIf { it > 0 } }.getOrNull()
               "propstat" -> if (Regex("HTTP/\\S+ 200(?: .*|$)").matches(status)) {
                 valid = true; directory = directory || propDirectory
                 if (propSize >= 0) size = propSize
+                if (propModifiedMs != null) modifiedMs = propModifiedMs
               }
               "response" -> if (valid && href.isNotEmpty()) {
                 val resolved = resolveHref(target, href)
                 if (resolved != null) {
                   if (!directory && size < 0) throw NetworkFailure("WebDAV 未提供有效文件大小")
-                  result.add(DavEntry(resolved, directory, if (directory) 0 else size))
+                  result.add(DavEntry(resolved, directory, if (directory) 0 else size, modifiedMs))
                   if (result.size > 50000) throw NetworkFailure("WebDAV 目录文件过多")
                 }
               }
@@ -192,7 +197,7 @@ internal class WebDavNetworkRemote(private val source: NetworkSource) : NetworkR
     return listing.mapNotNull { entry ->
       val segments = entry.url.pathSegments.filter { it.isNotEmpty() }
       if (segments.size != parent.size + 1 || segments.take(parent.size) != parent) null
-      else RemoteEntry(segments.last(), entry.size, entry.directory)
+      else RemoteEntry(segments.last(), entry.size, entry.directory, entry.modifiedMs)
     }.distinctBy { it.name }
   }
 
@@ -201,7 +206,7 @@ internal class WebDavNetworkRemote(private val source: NetworkSource) : NetworkR
     val parts = target.pathSegments.filter { it.isNotEmpty() }
     val item = propfind(target, "0").find { it.url.pathSegments.filter { part -> part.isNotEmpty() } == parts }
       ?: return RemoteStat("missing", 0)
-    return RemoteStat(if (item.directory) "dir" else "file", item.size)
+    return RemoteStat(if (item.directory) "dir" else "file", item.size, item.modifiedMs)
   }
 
   override fun open(relative: String, start: Long, length: Long, total: Long): InputStream {
@@ -238,6 +243,22 @@ internal class WebDavNetworkRemote(private val source: NetworkSource) : NetworkR
         override fun close() { response.close() }
       }
     } catch (error: Exception) { response.close(); throw error }
+  }
+
+  override fun readAtExact(relative: String, position: Long, buffer: ByteArray, offset: Int, length: Int, total: Long): Int {
+    require(position >= 0 && offset >= 0 && length >= 0 && offset <= buffer.size - length)
+    if (length == 0) return 0
+    if (position >= total) return -1
+    val requested = minOf(length.toLong(), total - position, 64 * 1024L).toInt()
+    return open(relative, position, requested.toLong(), total).use { input ->
+      var received = 0
+      while (received < requested) {
+        val count = input.read(buffer, offset + received, requested - received)
+        if (count <= 0) throw NetworkFailure("WebDAV 缩略图片段提前结束")
+        received += count
+      }
+      received
+    }
   }
 
   override fun close() {

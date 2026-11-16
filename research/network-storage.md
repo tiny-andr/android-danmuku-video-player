@@ -7,7 +7,7 @@
 - Connections are explicitly tested and saved. Editing with an empty password retains the saved password. Removing a connection never deletes remote files.
 - Discover LAN SMB runs only after a button press: bounded mDNS `_smb._tcp` plus one WS-Discovery probe, about seven seconds, up to 32 results. It does not use SMB1, NetBIOS, subnet port scanning, authentication or remote writes. Results are untrusted hints that prefill a new connection, not proof of SMB availability. Servers that do not advertise still require an IP address.
 - Connection failures use a high-contrast red alert with an explicit failure title and scroll into view. SMB server status codes distinguish login failures, unavailable shares, permission failures and signing failures; no passwords are included in errors.
-- SMB requires a host and share name. WebDAV requires a final HTTPS collection URL. SFTP requires a host, username/password and an explicitly verified SHA256 host fingerprint. Private-key authentication and automatic service discovery are not implemented.
+- SMB 需要服务器地址；新连接的共享名可选，留空时按账号认证后列出服务器公布的文件共享，进入共享才验证读取权限。服务器禁止枚举时仍可填写已知共享名直达。历史绑定共享来源保持原路径含义，不能直接清空共享名改变作用域。WebDAV 需要最终 HTTPS 集合地址；SFTP 仍需明确核对 SHA256 指纹。
 
 ## Transport and security
 

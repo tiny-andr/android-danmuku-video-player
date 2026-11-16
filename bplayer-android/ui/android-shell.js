@@ -20,6 +20,10 @@
   var expectedUrl = "";
   var failedLoad = false;
   var hookedArt = null;
+  var playbackOrigin = null;
+  var homePosition = null;
+  var navigation = window.AndroidNavigation;
+  var syncingPlayerSettings = false;
 
   function el(tag, cls, text) {
     var e = document.createElement(tag);
@@ -75,6 +79,9 @@
       ".mRecentRow{display:flex;align-items:center;gap:10px;padding:9px 10px;border-radius:11px;" +
       "background:rgba(255,255,255,.035);cursor:pointer;}" +
       ".mRecentRow:active{background:rgba(251,114,153,.13);}" +
+      ".mRecentRow{-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;}" +
+      "#mRecentActions{position:fixed;inset:0;z-index:200006;display:grid;grid-template-columns:minmax(0,1fr);align-items:end;justify-items:center;background:#0009;padding:calc(env(safe-area-inset-top,0px) + 16px) calc(env(safe-area-inset-right,0px) + 16px) calc(env(safe-area-inset-bottom,0px) + 16px) calc(env(safe-area-inset-left,0px) + 16px);box-sizing:border-box;}#mRecentActions[hidden]{display:none!important;}" +
+      "#mRecentActionCard{width:100%;max-width:430px;min-width:0;max-height:100%;overflow:auto;padding:18px;box-sizing:border-box;border:1px solid #ffffff24;border-radius:18px;background:#151823;color:#edf0fa;font:14px system-ui,sans-serif;}#mRecentActionCard h2{margin:0 0 10px;font-size:17px;}#mRecentActionName{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}#mRecentActionCard p{color:#a9b4cd;line-height:1.6;}#mRecentActionCard button{display:block;width:100%;min-height:46px;margin-top:10px;padding:10px;border:1px solid #ffffff24;border-radius:12px;background:#ffffff08;color:#edf0fa;font:inherit;}#mRecentActionCard #mRecentDelete{color:#ffb2c3;background:#e8547820;border-color:#e8547855;}" +
       ".mRecentRow .ic{flex:none;width:32px;height:32px;border-radius:9px;background:#202a3d;" +
       "display:flex;align-items:center;justify-content:center;font-size:14px;}" +
       ".mRecentRow .nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" +
@@ -85,7 +92,7 @@
       /* 竖屏启动页：不再强制横屏，按钮在上、最近播放下 */
       "@media (orientation:portrait){#mHome .mBody{flex-direction:column;gap:14px;padding:10px 16px 12px;}" +
       "#mHome .mLeft{flex:none;justify-content:flex-start;gap:13px;}" +
-      "#mHome .mRight{flex:0 1 auto;display:flex;max-width:none;max-height:44vh;min-height:120px;}" +
+      "#mHome .mRight{flex:1;display:flex;max-width:none;max-height:none;min-height:0;}" +
       "#mHome .mBrand h1{font-size:22px;}#mHome .mLogo{width:44px;height:44px;font-size:19px;}" +
       "#mHome .mBtn{min-height:58px;padding:10px 12px;}#mHome .mBtn b{font-size:15px;}}" +
 
@@ -178,6 +185,19 @@
       "max-height:calc(100vh - env(safe-area-inset-top,0px) - env(safe-area-inset-bottom,0px) - 16px)!important;padding:16px!important;}" +
 
       /* ---- 提示要压在启动页/播放页之上 ---- */
+      ".mDirectAction{display:none;}" +
+      "#mTop button:disabled{opacity:.38;}" +
+      "#mRecentView{min-width:38px;min-height:38px;border:1px solid #ffffff20;border-radius:10px;background:#ffffff08;color:#c8d2e7;font:12px inherit;}" +
+      ".mRecentThumb{display:none;width:100%;aspect-ratio:16/9;object-fit:cover;background:#202a3d;border-radius:9px;}" +
+      ".mRecentThumb:not([src]){visibility:hidden;}" +
+      ".mRecentList.is-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(145px,1fr));align-content:start;gap:10px;}" +
+      ".mRecentList.is-grid .mRecentRow{position:relative;display:grid;gap:7px;padding:8px;align-content:start;}" +
+      ".mRecentList.is-grid .mRecentThumb{display:block;}.mRecentList.is-grid .ic{position:absolute;left:8px;top:8px;width:calc(100% - 16px);height:auto;aspect-ratio:16/9;font-size:28px;}.mRecentList.is-grid .mRecentThumb.thumbnail-ready+.ic{display:none;}" +
+      ".mRecentList.is-grid .nm{width:100%;font-size:12px;}.mRecentList.is-grid .go{font-size:11px;}" +
+      "@media(min-width:720px){#mTop .mDirectAction{display:block;width:auto;min-width:48px;padding:0 10px;border-radius:12px;font-size:12px;line-height:normal;}#mInfo{left:auto;width:min(460px,calc(100vw - 32px));right:16px;}" +
+      ".settings-modal{width:min(620px,calc(100vw - 48px))!important;max-width:620px!important;}" +
+      ".block-panel{left:auto!important;right:16px!important;width:min(420px,calc(100vw - 32px))!important;max-width:420px!important;}}" +
+      "@media(min-width:720px) and (min-height:540px){#mHome .mBody{flex-direction:row;gap:24px;padding:24px;}#mHome .mLeft{flex:0 0 40%;justify-content:center;}#mHome .mRight{flex:1;max-width:none;max-height:none;min-height:0;}#mHome .mActions{flex-direction:column;}#mHome .mBtn{flex:none;min-height:76px;}#mHome .mRecentList{gap:10px;}#mHome .mRecentRow{min-height:58px;}}" +
       ".toast{z-index:200010!important;}" +
       ".pill{z-index:100001!important;}";
     var style = document.createElement("style");
@@ -200,6 +220,7 @@
   }
 
   function openBrowser(m) {
+    navigation.invalidate();
     return window.AndroidFiles.open(m);
   }
 
@@ -238,10 +259,147 @@
     renderRecent();
   }
 
-  function renderRecent() {
+  var recentGrid = false;
+  var recentThumbnailCleanups = [];
+  var recentPress = null;
+  var recentClickBlockedUntil = 0;
+  var recentTouchCancelledUntil = 0;
+  var recentTouchConsumed = false;
+  var recentTouchActive = false;
+  var recentTouchCancelled = false;
+  var recentActions = null;
+  var recentActionPath = "";
+
+  function cancelRecentPress(blockClick) {
+    if (!recentPress) return;
+    clearTimeout(recentPress.timer);
+    if (blockClick || recentPress.opened) { recentClickBlockedUntil = Date.now() + 1000; recentTouchConsumed = true; }
+    if (blockClick) recentTouchCancelled = true;
+    recentPress = null;
+  }
+
+  function recentPositionAfterDelete(path) {
+    var box = document.getElementById("mRecentList");
+    var position = navigation.captureScroll(box);
+    if (!position || position.path !== path) return position;
+    var rows = Array.from(box.querySelectorAll("[data-path]"));
+    var index = rows.findIndex(function (row) { return row.dataset.path === path; });
+    var replacement = rows[index + 1] || rows[index - 1];
+    if (replacement) {
+      position.path = replacement.dataset.path;
+      position.offset = replacement.getBoundingClientRect().top - box.getBoundingClientRect().top;
+    }
+    return position;
+  }
+
+  function ensureRecentActions() {
+    if (recentActions) return;
+    recentActions = el("div"); recentActions.id = "mRecentActions"; recentActions.hidden = true;
+    recentActions.setAttribute("role", "dialog"); recentActions.setAttribute("aria-modal", "true");
+    recentActions.setAttribute("aria-labelledby", "mRecentActionTitle");
+    recentActions.setAttribute("aria-describedby", "mRecentActionNote");
+    var card = el("div"); card.id = "mRecentActionCard";
+    var title = el("h2", "", "最近播放记录"); title.id = "mRecentActionTitle";
+    var name = el("div"); name.id = "mRecentActionName";
+    var note = el("p", "", "只移除这条播放历史，不会删除视频、续播进度或封面。"); note.id = "mRecentActionNote";
+    var remove = el("button", "", "删除这条记录"); remove.id = "mRecentDelete"; remove.type = "button";
+    var cancel = el("button", "", "取消"); cancel.id = "mRecentDeleteCancel"; cancel.type = "button";
+    remove.addEventListener("click", function () {
+      if (navigation.top !== "recentActions" || !recentActionPath) return;
+      var path = recentActionPath;
+      var position = recentPositionAfterDelete(path);
+      writeRecent(readRecent().filter(function (item) { return item.p !== path; }));
+      navigation.close("recentActions");
+      renderRecent(position);
+    });
+    cancel.addEventListener("click", function () { navigation.close("recentActions"); });
+    recentActions.addEventListener("click", function (event) {
+      if (event.target === recentActions) navigation.close("recentActions");
+    });
+    card.append(title, name, note, remove, cancel); recentActions.appendChild(card); document.body.appendChild(recentActions);
+    navigation.register("recentActions", function () { recentActions.hidden = false; }, function () {
+      recentActions.hidden = true; recentActionPath = ""; cancelRecentPress(true);
+    });
+  }
+
+  function openRecentActions(path) {
+    if (!home || home.classList.contains("hide")) return;
+    var item = readRecent().find(function (entry) { return entry.p === path; });
+    if (!item) return;
+    ensureRecentActions();
+    navigation.open("recentActions");
+    recentActionPath = path;
+    document.getElementById("mRecentActionName").textContent = item.n || item.p;
+    document.getElementById("mRecentActionName").title = item.n || item.p;
+    recentClickBlockedUntil = Date.now() + 1000;
+  }
+
+  function bindRecentRow(row, path) {
+    row.addEventListener("touchstart", function (event) {
+      cancelRecentPress(false);
+      recentTouchActive = true;
+      if (event.touches.length !== 1) { recentTouchCancelled = true; recentTouchCancelledUntil = Date.now() + 1000; return; }
+      var touch = event.touches[0];
+      recentTouchCancelledUntil = 0; recentTouchConsumed = false; recentTouchCancelled = false;
+      var press = { path: path, identifier: touch.identifier, x: touch.clientX, y: touch.clientY, opened: false, timer: null };
+      recentPress = press;
+      press.timer = setTimeout(function () {
+        if (recentPress !== press || !row.isConnected || navigation.top) return;
+        press.opened = true;
+        openRecentActions(path);
+      }, 550);
+    }, { passive: true });
+    row.addEventListener("touchmove", function (event) {
+      if (!recentPress) return;
+      var touch = event.touches[0];
+      if (event.touches.length !== 1 || touch.identifier !== recentPress.identifier || Math.hypot(touch.clientX - recentPress.x, touch.clientY - recentPress.y) > 10) {
+        recentTouchCancelledUntil = Date.now() + 1000; cancelRecentPress(true);
+      }
+    }, { passive: true });
+    row.addEventListener("touchend", function (event) {
+      if (recentTouchConsumed || (recentPress && recentPress.opened)) { event.preventDefault(); recentClickBlockedUntil = Date.now() + 1000; }
+      cancelRecentPress(false); recentTouchConsumed = false; recentTouchActive = false;
+      if (recentTouchCancelled) recentTouchCancelledUntil = Date.now() + 1000;
+    }, { passive: false });
+    row.addEventListener("touchcancel", function () { recentTouchCancelledUntil = Date.now() + 1000; cancelRecentPress(true); recentTouchActive = false; });
+    row.addEventListener("contextmenu", function (event) {
+      event.preventDefault(); event.stopPropagation();
+      if ((recentTouchActive && recentTouchCancelled) || Date.now() < recentTouchCancelledUntil) return;
+      cancelRecentPress(true); openRecentActions(path);
+    });
+    row.addEventListener("click", function (event) {
+      if (Date.now() < recentClickBlockedUntil || navigation.top === "recentActions") { event.preventDefault(); event.stopPropagation(); return; }
+      cancelRecentPress(false);
+      if (window.__BplayerDesktop) window.__BplayerDesktop.loadVideo(path, null, null, homeOrigin());
+    });
+  }
+
+  function bindRecentList(box) {
+    box.addEventListener("scroll", function () {
+      if (!recentPress) return;
+      recentTouchCancelledUntil = Date.now() + 1000; cancelRecentPress(true);
+    }, { passive: true });
+    document.addEventListener("touchstart", function (event) {
+      if (event.touches.length > 1) { recentTouchCancelledUntil = Date.now() + 1000; cancelRecentPress(true); }
+    }, { capture: true, passive: true });
+    window.addEventListener("blur", function () { cancelRecentPress(true); });
+    window.addEventListener("pagehide", function () { cancelRecentPress(true); });
+  }
+
+  try { recentGrid = localStorage.getItem("bplayer.android.recentView") === "grid"; } catch (error) {}
+  function renderRecent(position) {
+    cancelRecentPress(false);
+    recentThumbnailCleanups.forEach(function (cleanup) { cleanup(); });
+    recentThumbnailCleanups = [];
     if (!home) return;
     var box = document.getElementById("mRecentList");
     if (!box) return;
+    if (position) homePosition = position;
+    else if (!home.classList.contains("hide")) homePosition = navigation.captureScroll(box);
+    box.classList.toggle("is-grid", recentGrid);
+    var viewButton = document.getElementById("mRecentView");
+    viewButton.textContent = recentGrid ? "列表" : "预览图";
+    viewButton.setAttribute("aria-pressed", String(recentGrid));
     box.textContent = "";
     var list = readRecent();
     writeRecent(list); // 顺手把历史上重复/多斜杠的路径清一遍
@@ -251,18 +409,20 @@
       box.appendChild(empty);
       return;
     }
-    list.slice(0, 5).forEach(function (item) {
+    list.slice(0, 8).forEach(function (item) {
       var row = el("div", "mRecentRow");
+      if (recentGrid) {
+        var image = el("img", "mRecentThumb"); image.alt = ""; row.appendChild(image);
+        if (window.AndroidThumbnailsView) recentThumbnailCleanups.push(window.AndroidThumbnailsView.observe(image, item.p, { cacheOnly: true }));
+      }
       row.appendChild(el("span", "ic", "🎞"));
       row.appendChild(el("span", "nm", item.n || item.p));
       row.appendChild(el("span", "go", "继续"));
-      row.title = item.p;
-      row.addEventListener("click", function () {
-        if (!window.__BplayerDesktop) return;
-        window.__BplayerDesktop.loadVideo(item.p, null);
-      });
+      row.title = item.p; row.dataset.path = item.p;
+      bindRecentRow(row, item.p);
       box.appendChild(row);
     });
+    if (!home.classList.contains("hide")) navigation.restoreScroll(box, homePosition);
   }
 
   /* ------------------------------------------------------------------ *
@@ -290,11 +450,13 @@
         '</div>' +
         '<div class="mRight">' +
           '<div class="mRightHead"><h2>最近播放</h2>' +
+            '<button type="button" id="mRecentView" aria-label="切换最近播放视图">预览图</button>' +
             '<button type="button" id="mClearRecent">清空</button></div>' +
           '<div class="mRecentList" id="mRecentList"></div>' +
         '</div>' +
       '</div>';
     document.body.appendChild(home);
+    bindRecentList(document.getElementById("mRecentList"));
 
     function openVideo() {
       var btn = document.getElementById("btnOpenVideo");
@@ -309,6 +471,7 @@
     var networkButton = document.getElementById("mOpenNetwork");
     networkButton.style.flex = "none";
     networkButton.addEventListener("click", function () {
+      navigation.invalidate();
       window.AndroidFiles.open("file", "network").then(function (path) {
         if (path && window.__BplayerDesktop) return window.__BplayerDesktop.loadVideo(path, null);
       }).catch(showStorageError);
@@ -316,6 +479,11 @@
     document.getElementById("mHomeSettings").addEventListener("click", function () {
       var b = document.getElementById("btnSettings");
       if (b) b.click();
+    });
+    document.getElementById("mRecentView").addEventListener("click", function () {
+      recentGrid = !recentGrid;
+      try { localStorage.setItem("bplayer.android.recentView", recentGrid ? "grid" : "list"); } catch (error) {}
+      renderRecent();
     });
     document.getElementById("mClearRecent").addEventListener("click", function () {
       writeRecent([]);
@@ -334,25 +502,33 @@
     topbar.innerHTML =
       '<button type="button" class="mIconBtn" id="mBack" title="返回">‹</button>' +
       '<div class="mTitleBox"><div id="mTitle">—</div><div id="mDan"></div></div>' +
+      '<button type="button" class="mIconBtn mDirectAction" id="mQuickAudio">音轨</button>' +
+      '<button type="button" class="mIconBtn mDirectAction" id="mQuickSub">字幕</button>' +
+      '<button type="button" class="mIconBtn mDirectAction" id="mQuickSettings">设置</button>' +
       '<button type="button" class="mIconBtn" id="mRotateBtn" title="切换为横屏" aria-label="切换为横屏">横屏</button>' +
       '<button type="button" class="mIconBtn" id="mInfoBtn" title="视频信息与功能">i</button>' +
       '<button type="button" class="mIconBtn" id="mPlBtn" title="播放列表">≡</button>';
     document.body.appendChild(topbar);
     buildInfoPanel();
+    [["mQuickAudio", "mActAudio"], ["mQuickSub", "mActSub"], ["mQuickSettings", "mActSettings"]].forEach(function (pair) {
+      document.getElementById(pair[0]).addEventListener("click", function () {
+        navigation.clear();
+        document.getElementById(pair[1]).click();
+      });
+    });
 
-    document.getElementById("mBack").addEventListener("click", exitPlaying);
+    document.getElementById("mBack").addEventListener("click", function () { window.__aAndroidBack(); });
     document.getElementById("mInfoBtn").addEventListener("click", function () {
       if (!infoPanel) return;
       var opening = infoPanel.hidden;
       openInfo(opening);
     });
     document.getElementById("mPlBtn").addEventListener("click", function () {
-      var pl = document.getElementById("playlist");
-      if (pl) pl.classList.add("open");
+      navigation.open("playlist");
     });
     document.getElementById("mRotateBtn").addEventListener("click", function () {
       if (!playing) return;
-      closeDanmakuSettings();
+      navigation.close("danmaku");
       var direction = innerWidth > innerHeight ? "portrait" : "landscape";
       try { if (window.AndroidUI && window.AndroidUI.setPlaybackOrientation) window.AndroidUI.setPlaybackOrientation(direction); } catch (error) {}
       var art = window.Bplayer && window.Bplayer.art;
@@ -385,12 +561,11 @@
     document.body.appendChild(infoPanel);
 
     document.getElementById("mInfoClose").addEventListener("click", function () {
-      infoPanel.hidden = true;
+      navigation.close("mInfo");
     });
     function forward(btnId) {
-      infoPanel.hidden = true;
       var b = document.getElementById(btnId);
-      if (b && !b.hidden) b.click();
+      if (b && !b.hidden && !b.disabled) navigation.forward(function () { b.click(); });
     }
     document.getElementById("mActAudio").addEventListener("click", function () {
       forward("btnAudioEntry");
@@ -402,9 +577,7 @@
       forward("btnBlockEntry");
     });
     document.getElementById("mActSettings").addEventListener("click", function () {
-      infoPanel.hidden = true;
-      var b = document.getElementById("btnSettings");
-      if (b) b.click();
+      forward("btnSettings");
     });
   }
 
@@ -427,20 +600,14 @@
     var bs = document.getElementById("mActSub");
     if (ba) ba.disabled = !ab || ab.hidden;
     if (bs) bs.disabled = !sb || sb.hidden;
+    var qa = document.getElementById("mQuickAudio");
+    var qs = document.getElementById("mQuickSub");
+    if (qa) qa.disabled = !ab || ab.hidden;
+    if (qs) qs.disabled = !sb || sb.hidden;
   }
 
   function openInfo(on) {
-    if (!infoPanel) return;
-    if (on) {
-      ["audioPanel", "subtitlePanel", "densityPanel", "blockPanel"].forEach(function (id) {
-        var p = document.getElementById(id);
-        if (p) p.hidden = true;
-      });
-      var pl = document.getElementById("playlist");
-      if (pl) pl.classList.remove("open");
-      fillInfo();
-    }
-    infoPanel.hidden = !on;
+    if (on) navigation.open("mInfo"); else navigation.close("mInfo");
   }
 
   function setImmersive(on) {
@@ -458,7 +625,7 @@
     document.head.appendChild(style);
     loadPanel = el("div"); loadPanel.id = "mLoading"; loadPanel.hidden = true;
     loadPanel.setAttribute("role", "status");
-    loadPanel.innerHTML = '<div id="mLoadingSpinner"></div><div id="mLoadingName"></div><div id="mLoadingMessage"></div><div id="mLoadingActions"><button type="button" id="mLoadingCancel">返回文件列表</button><button type="button" id="mLoadingRetry" hidden>重试</button></div>';
+    loadPanel.innerHTML = '<div id="mLoadingSpinner"></div><div id="mLoadingName"></div><div id="mLoadingMessage"></div><div id="mLoadingActions"><button type="button" id="mLoadingCancel">返回</button><button type="button" id="mLoadingRetry" hidden>重试</button></div>';
     document.body.appendChild(loadPanel);
     document.getElementById("mLoadingCancel").addEventListener("click", cancelLoading);
     document.getElementById("mLoadingRetry").addEventListener("click", function () {
@@ -466,7 +633,16 @@
     });
   }
 
-  function beginLoading(path, name) {
+  function beginLoading(path, name, origin) {
+    if (origin) playbackOrigin = origin;
+    else if (!playbackOrigin) playbackOrigin = homeOrigin();
+    if (playbackOrigin.type === "playlist") {
+      var index = playbackOrigin.snapshot.episodes.findIndex(function (episode) { return episode.path === path; });
+      if (index >= 0) playbackOrigin.snapshot.index = index;
+    }
+    navigation.invalidate(); navigation.clear();
+    if (playbackThumbnail) { playbackThumbnail.cancel(); playbackThumbnail = null; }
+    playbackCaptureAttempts = 0; playbackCaptured = false; playbackCaptureAt = 0;
     window.AndroidPlayerTools.begin(path);
     ensureLoadPanel(); clearTimeout(loadTimer);
     requestedPath = path; expectedUrl = ""; loading = true; failedLoad = false; playing = false;
@@ -508,13 +684,7 @@
     document.getElementById("mLoadingRetry").hidden = false;
   }
 
-  function cancelLoading() {
-    var dir = requestedPath.replace(/\/[^/]+$/, "");
-    exitPlaying();
-    window.AndroidFiles.open("file", null, dir).then(function (value) {
-      if (value && window.__BplayerDesktop) window.__BplayerDesktop.loadVideo(value, null);
-    }).catch(showStorageError);
-  }
+  function cancelLoading() { exitPlaying(); }
 
   function releaseVideo() {
     var art = window.Bplayer && window.Bplayer.art;
@@ -583,15 +753,14 @@
         if (event.target.closest(".apd-config-panel")) return;
         event.stopPropagation();
         var opening = !controls.classList.contains("is-config-open");
-        controls.classList.toggle("is-config-open", opening);
-        config.setAttribute("aria-expanded", String(opening));
+        if (opening) navigation.open("danmaku"); else navigation.close("danmaku");
         sizePlaybackControls(); art.controls.show = true;
         if (window.AndroidPlayerTools) window.AndroidPlayerTools.onControls(true);
       });
       config.addEventListener("keydown", function (event) {
         if (event.target !== config) return;
         if (event.key === "Enter" || event.key === " ") { event.preventDefault(); config.click(); }
-        if (event.key === "Escape") closeDanmakuSettings();
+        if (event.key === "Escape") navigation.close("danmaku");
       });
     }
     if (window.ResizeObserver) {
@@ -614,7 +783,7 @@
     var d = document.getElementById("mDan");
     if (t && title) t.textContent = title;
     if (d) d.textContent = dan;
-    if (infoPanel && !infoPanel.hidden) fillInfo();
+    fillInfo();
   }
 
   function rememberCurrent() {
@@ -632,6 +801,28 @@
     rememberVideo(path, name);
   }
 
+  var playbackThumbnail = null;
+  var playbackCaptureAttempts = 0;
+  var playbackCaptureAt = 0;
+  var playbackCaptured = false;
+  function cacheCurrentThumbnail() {
+    if (playbackThumbnail || playbackCaptured || playbackCaptureAttempts >= 6 || !requestedPath || !window.AndroidThumbnailsView) return;
+    var now = Date.now();
+    if (now - playbackCaptureAt < 2000) return;
+    var art = window.Bplayer && window.Bplayer.art;
+    if (!matchesSource(art)) return;
+    playbackCaptureAttempts++; playbackCaptureAt = now;
+    var path = requestedPath;
+    var task = window.AndroidThumbnailsView.capture(art.video, path, window.__BplayerDesktop.currentStat);
+    if (!task) return;
+    playbackThumbnail = task;
+    task.promise.then(function (result) {
+      if (playbackThumbnail !== task || requestedPath !== path) return;
+      playbackThumbnail = null;
+      playbackCaptured = result && result.status === "captured";
+    });
+  }
+
   function enterPlaying() {
     var art = window.Bplayer && window.Bplayer.art;
     if (!matchesSource(art) || failedLoad || art.video.readyState < 2 || !art.video.videoWidth) return;
@@ -641,21 +832,22 @@
     document.body.classList.add("m-playing");
     if (home) home.classList.add("hide");
     if (topbar) topbar.classList.add("show");
-    var pl = document.getElementById("playlist");
-    if (pl) pl.classList.remove("open");
-    openInfo(false);
-    setImmersive(true); setPlaybackActive(!art.video.paused);
+    setImmersive(true); setPlaybackActive(true);
     setVideoOrientation(art.video.videoWidth, art.video.videoHeight);
     window.AndroidGestures.setActive(true);
     updateTopbar();
     if (first) {
       setTimeout(function () { try { art.resize(); } catch (e) {} }, 80);
       rememberCurrent();
+      cacheCurrentThumbnail();
       window.AndroidPlayerTools.ready();
     }
   }
 
   function exitPlaying() {
+    var origin = playbackOrigin; playbackOrigin = null;
+    navigation.invalidate(); navigation.clear();
+    if (playbackThumbnail) { playbackThumbnail.cancel(); playbackThumbnail = null; }
     window.AndroidPlayerTools.finish();
     closeDanmakuSettings();
     playing = false; loading = false; failedLoad = false; requestedPath = ""; expectedUrl = ""; clearTimeout(loadTimer);
@@ -669,6 +861,29 @@
     setImmersive(false); setPlaybackActive(false); setVideoOrientation(0, 0);
     window.AndroidGestures.setActive(false);
     renderRecent();
+    restoreOrigin(origin);
+  }
+
+  function homeOrigin() {
+    var box = document.getElementById("mRecentList");
+    homePosition = navigation.captureScroll(box);
+    return { type: "home", position: homePosition };
+  }
+
+  function restoreOrigin(origin) {
+    if (!origin) return;
+    if (origin.type === "browser") {
+      window.AndroidFiles.restore(origin.snapshot).then(function (path) {
+        if (!path || !window.__BplayerDesktop) return;
+        if (origin.snapshot.mode === "dir") return window.__BplayerDesktop.openFolder(path);
+        return window.__BplayerDesktop.loadVideo(path, null);
+      }).catch(showStorageError);
+    } else if (origin.type === "playlist" && window.__BplayerDesktop) {
+      window.__BplayerDesktop.restorePlaylist(origin.snapshot);
+    } else {
+      homePosition = origin.position;
+      navigation.restoreScroll(document.getElementById("mRecentList"), homePosition);
+    }
   }
 
   function attachArt(art) {
@@ -676,6 +891,10 @@
     hookedArt = art; window.AndroidGestures.attach(art);
     window.AndroidPlayerTools.attach(art);
     mountDanmakuControls(art);
+    art.on("setting", function (show) {
+      if (syncingPlayerSettings) return;
+      if (show) navigation.open("playerSettings"); else navigation.close("playerSettings");
+    });
     art.on("control", function (show) {
       if (window.AndroidPlayerTools.locked || window.AndroidPlayerTools.resumePending) {
         if (topbar) topbar.classList.remove("show");
@@ -691,11 +910,13 @@
     art.on("video:loadedmetadata", function () {
       if (matchesSource(art) && !failedLoad && art.video.videoWidth) setVideoOrientation(art.video.videoWidth, art.video.videoHeight);
     });
+    art.on("video:timeupdate", cacheCurrentThumbnail);
+    art.on("video:seeked", cacheCurrentThumbnail);
     art.on("video:loadeddata", enterPlaying);
     art.on("video:canplay", enterPlaying);
     art.on("video:playing", enterPlaying);
     art.on("video:play", function () { if (matchesSource(art)) setPlaybackActive(true); });
-    art.on("video:pause", function () { if (matchesSource(art)) setPlaybackActive(false); });
+    art.on("video:pause", function () { if (matchesSource(art)) setPlaybackActive(playing && !art.video.ended); });
     art.on("video:ended", function () { if (matchesSource(art)) setPlaybackActive(false); });
     art.on("video:error", function () {
       if (matchesSource(art) && !failedLoad) failLoading("网络读取中断，或此视频编码不受当前内核支持。");
@@ -708,6 +929,7 @@
 
   window.AndroidPlayback = {
     begin: beginLoading, source: sourceLoading, attach: attachArt, fail: failLoading, exit: exitPlaying,
+    homeOrigin: homeOrigin, restoreOrigin: restoreOrigin,
     get loading() { return loading; },
     get active() { return playing || loading; }
   };
@@ -719,29 +941,21 @@
       var mo = new MutationObserver(updateTopbar);
       if (cv) mo.observe(cv, { childList: true, characterData: true, subtree: true });
       if (cd) mo.observe(cd, { childList: true, characterData: true, subtree: true });
+      ["btnAudioEntry", "btnSubtitleEntry"].forEach(function (id) {
+        var button = document.getElementById(id);
+        if (button) mo.observe(button, { attributes: true, attributeFilter: ["hidden", "disabled"] });
+      });
     }
   }
 
   /* 系统返回键：设置/信息卡/浮窗 → 文件浏览器 → 播放列表 → 播放页 → 退出应用 */
   window.__aAndroidBack = function () {
+    if (navigation.top === "recentActions") { navigation.close("recentActions"); return true; }
     if (window.AndroidPlayerTools.back()) return true;
-    var mask = document.getElementById("settingsMask");
-    if (mask && !mask.hidden) {
-      var sc = document.getElementById("settingsClose");
-      if (sc) sc.click(); else mask.hidden = true;
-      return true;
-    }
-    if (infoPanel && !infoPanel.hidden) { infoPanel.hidden = true; return true; }
-    var panels = ["audioPanel", "subtitlePanel", "densityPanel", "blockPanel"];
-    for (var i = 0; i < panels.length; i++) {
-      var p = document.getElementById(panels[i]);
-      if (p && !p.hidden) { p.hidden = true; return true; }
-    }
-    if (closeDanmakuSettings()) return true;
     if (window.AndroidFiles.back()) return true;
     if (loading) { cancelLoading(); return true; }
-    var pl = document.getElementById("playlist");
-    if (pl && pl.classList.contains("open")) { pl.classList.remove("open"); return true; }
+    if (navigation.cancelPending()) return true;
+    if (navigation.close()) return true;
     if (playing) { exitPlaying(); return true; }
     try {
       if (window.AndroidUI && window.AndroidUI.exitApp) window.AndroidUI.exitApp();
@@ -768,20 +982,44 @@
   function boot() {
     buildHome();
     buildTopbar();
+    ["audioPanel", "subtitlePanel", "densityPanel", "blockPanel", "settingsMask"].forEach(function (id) {
+      navigation.register(id, function () { document.getElementById(id).hidden = false; }, function () { document.getElementById(id).hidden = true; });
+    });
+    navigation.register("mInfo", function () { fillInfo(); infoPanel.hidden = false; }, function () { infoPanel.hidden = true; });
+    navigation.register("playlist", function () { document.getElementById("playlist").classList.add("open"); }, function () { document.getElementById("playlist").classList.remove("open"); }, function () {
+      if (window.__BplayerDesktop) window.__BplayerDesktop.playlistClosed();
+    });
+    navigation.register("danmaku", function () {
+      var controls = document.querySelector(".mDanControls");
+      if (controls) { controls.classList.add("is-config-open"); controls.querySelector(".apd-config").setAttribute("aria-expanded", "true"); }
+    }, closeDanmakuSettings);
+    function playerSettings(on) {
+      var art = window.Bplayer && window.Bplayer.art;
+      if (!art) return;
+      syncingPlayerSettings = true;
+      try { art.setting.show = on; } finally { syncingPlayerSettings = false; }
+    }
+    navigation.register("playerSettings", function () { playerSettings(true); }, function () { playerSettings(false); });
     polishSettings();
     hookArt();
     observeInfo();
+    document.addEventListener("keydown", function (event) {
+      if (event.key !== "Escape" || (!playing && !loading && !navigation.top && !window.AndroidFiles.active)) return;
+      event.preventDefault(); event.stopImmediatePropagation(); window.__aAndroidBack();
+    }, true);
     window.addEventListener("android-touch-lock", function () {
-      closeDanmakuSettings(); openInfo(false);
-      ["audioPanel", "subtitlePanel", "densityPanel", "blockPanel"].forEach(function (id) {
-        var panel = document.getElementById(id); if (panel) panel.hidden = true;
-      });
-      var playlist = document.getElementById("playlist"); if (playlist) playlist.classList.remove("open");
+      navigation.clear();
     });
-    window.addEventListener("resize", updateRotateButton);
+    window.addEventListener("resize", function () {
+      updateRotateButton();
+      var art = window.Bplayer && window.Bplayer.art;
+      if (art) art.resize();
+      sizePlaybackControls();
+      if (infoPanel && !infoPanel.hidden) fillInfo();
+    });
     document.addEventListener("click", function (event) {
       if (!document.querySelector(".mDanControls.is-config-open") || event.target.closest(".mDanControls")) return;
-      closeDanmakuSettings();
+      navigation.close("danmaku");
       if (!event.target.closest("button,.art-controls,#mTop,#mInfo")) event.stopPropagation();
     }, true);
     // 不再锁定方向：旋转后重排播放器（启动页靠 CSS 自动切竖排）

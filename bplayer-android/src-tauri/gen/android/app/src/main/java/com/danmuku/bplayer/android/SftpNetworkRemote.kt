@@ -90,14 +90,17 @@ internal class SftpNetworkRemote(private val source: NetworkSource) : NetworkRem
   @Synchronized
   override fun list(relative: String): List<RemoteEntry> = sftp.ls(checked(relative))
     .filter { it.name != "." && it.name != ".." && (it.isDirectory || it.isRegularFile) }
-    .map { RemoteEntry(it.name, it.attributes.size.coerceAtLeast(0), it.isDirectory) }
+    .map { RemoteEntry(it.name, it.attributes.size.coerceAtLeast(0), it.isDirectory, modified(it.attributes)) }
+
+  private fun modified(attributes: net.schmizz.sshj.sftp.FileAttributes): Long? =
+    attributes.mtime.takeIf { it > 0 && it <= Long.MAX_VALUE / 1000 }?.times(1000)
 
   @Synchronized
   override fun stat(relative: String): RemoteStat = try {
     val attributes = sftp.stat(checked(relative))
     when (attributes.type) {
-      FileMode.Type.DIRECTORY -> RemoteStat("dir", 0)
-      FileMode.Type.REGULAR -> RemoteStat("file", attributes.size.coerceAtLeast(0))
+      FileMode.Type.DIRECTORY -> RemoteStat("dir", 0, modified(attributes))
+      FileMode.Type.REGULAR -> RemoteStat("file", attributes.size.coerceAtLeast(0), modified(attributes))
       else -> throw NetworkFailure("不允许访问此 SFTP 文件类型")
     }
   } catch (error: SFTPException) {
@@ -115,6 +118,17 @@ internal class SftpNetworkRemote(private val source: NetworkSource) : NetworkRem
       val buffered = java.io.BufferedInputStream(ahead, 65536)
       return LimitedNetworkStream(buffered, length) { file.close() }
     } catch (error: Exception) { file.close(); throw error }
+  }
+
+  @Synchronized
+  override fun readAtExact(relative: String, position: Long, buffer: ByteArray, offset: Int, length: Int, total: Long): Int {
+    require(position >= 0 && offset >= 0 && length >= 0 && offset <= buffer.size - length)
+    if (length == 0) return 0
+    if (position >= total) return -1
+    return sftp.open(checked(relative), setOf(OpenMode.READ)).use { file ->
+      if (file.length() != total) throw NetworkFailure("远端文件大小已改变，请重新打开视频")
+      file.read(position, buffer, offset, minOf(length.toLong(), total - position, 64 * 1024L).toInt())
+    }
   }
 
   override fun close() { abort(); runCatching { sftp.close() }; runCatching { ssh.close() } }

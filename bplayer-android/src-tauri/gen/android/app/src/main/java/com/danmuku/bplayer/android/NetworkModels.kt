@@ -68,13 +68,14 @@ internal data class NetworkSource(
   val domain: String,
   val share: String,
   val url: String,
-  val hostKey: String
+  val hostKey: String,
+  val scope: String = "share"
 ) {
   fun json(secret: Boolean = false): JSONObject = JSONObject().apply {
     put("id", id); put("name", name); put("protocol", protocol)
     put("host", host); put("port", port); put("root", root)
     put("username", username); put("domain", domain); put("share", share)
-    put("url", url); put("hostKey", hostKey)
+    put("url", url); put("hostKey", hostKey); put("scope", scope)
     if (secret) put("password", password) else put("hasPassword", password.isNotEmpty())
   }
 
@@ -94,8 +95,19 @@ internal data class NetworkSource(
       if (port !in 1..65535) throw NetworkFailure("服务器端口必须在 1 至 65535 之间")
       val root = NetworkPaths.segments(json.optString("root")).joinToString("/")
       val share = json.optString("share").trim()
-      if (protocol == "smb" && (share.isEmpty() || share.contains('/') || NetworkPaths.segments(share).size != 1)) {
-        throw NetworkFailure("请输入有效的 SMB 共享名称")
+      val scope = if (json.has("scope")) json.optString("scope") else previous?.scope ?: "share"
+      if (scope !in setOf("share", "server") || scope == "server" && protocol != "smb") {
+        throw NetworkFailure("网络存储作用域无效")
+      }
+      if (previous != null && previous.scope != scope) {
+        throw NetworkFailure("不能改变已有连接的共享作用域，请新建连接以保留播放记录")
+      }
+      if (protocol == "smb") {
+        if (scope == "server") {
+          if (share.isNotEmpty() || root.isNotEmpty()) throw NetworkFailure("服务器连接请留空共享名称和起始文件夹")
+        } else if (!SmbShares.validName(share)) {
+          throw NetworkFailure("请输入有效的 SMB 共享名称；浏览全部共享请新建服务器连接")
+        }
       }
       val key = json.optString("hostKey").trim()
       if (key.isNotEmpty() && !Regex("SHA256:[A-Za-z0-9+/]{43}=?").matches(key)) {
@@ -103,7 +115,7 @@ internal data class NetworkSource(
       }
       val password = json.optString("password").takeIf { it.isNotEmpty() } ?: previous?.password.orEmpty()
       return NetworkSource(id, name, protocol, host, port, root, json.optString("username"),
-        password, json.optString("domain"), share, json.optString("url").trim(), key.trimEnd('='))
+        password, json.optString("domain"), share, json.optString("url").trim(), key.trimEnd('='), scope)
     }
   }
 }

@@ -5,13 +5,15 @@ import java.io.InputStream
 import java.util.concurrent.ConcurrentHashMap
 import org.json.JSONObject
 
-internal data class RemoteEntry(val name: String, val size: Long, val directory: Boolean) {
+internal data class RemoteEntry(val name: String, val size: Long, val directory: Boolean, val modifiedMs: Long? = null) {
   fun json(parent: String): JSONObject = JSONObject().put("name", name)
     .put("path", NetworkPaths.child(parent, name)).put("size", size).put("is_dir", directory)
+    .put("modified_ms", modifiedMs ?: JSONObject.NULL)
 }
 
-internal data class RemoteStat(val kind: String, val size: Long) {
+internal data class RemoteStat(val kind: String, val size: Long, val modifiedMs: Long? = null) {
   fun json(): JSONObject = JSONObject().put("kind", kind).put("size", size)
+    .put("modified_ms", modifiedMs ?: JSONObject.NULL)
 }
 
 internal interface NetworkRemote : Closeable {
@@ -20,6 +22,8 @@ internal interface NetworkRemote : Closeable {
   fun list(relative: String): List<RemoteEntry>
   fun stat(relative: String): RemoteStat
   fun open(relative: String, start: Long, length: Long, total: Long): InputStream
+  fun readAtExact(relative: String, position: Long, buffer: ByteArray, offset: Int, length: Int, total: Long): Int =
+    throw NetworkFailure("此网络存储不支持受限随机读取")
 }
 
 internal class PositionedNetworkStream(
@@ -75,7 +79,7 @@ internal class LimitedNetworkStream(
   }
 }
 
-internal enum class NetworkRole { METADATA, MEDIA }
+internal enum class NetworkRole { METADATA, MEDIA, THUMBNAIL }
 
 internal class NetworkConnections(
   private val factory: ((NetworkSource) -> NetworkRemote)? = null,
@@ -83,7 +87,9 @@ internal class NetworkConnections(
     2, 2, 30, java.util.concurrent.TimeUnit.SECONDS, java.util.concurrent.LinkedBlockingQueue(256),
     { task -> Thread(task, "network-retire").apply { isDaemon = true } })
 ) : Closeable {
-  private data class Key(val id: String, val role: NetworkRole)
+  private data class Key(val id: String, val role: NetworkRole, val share: String)
+  private fun key(source: NetworkSource, role: NetworkRole) = Key(source.id, role,
+    if (source.protocol == "smb") source.scope + ":" + source.share.lowercase(java.util.Locale.ROOT) else "")
   private data class Entry(val source: NetworkSource, val remote: NetworkRemote)
   private class Slot {
     val lock = java.util.concurrent.locks.ReentrantLock()
@@ -96,7 +102,14 @@ internal class NetworkConnections(
   fun <Result> run(source: NetworkSource, role: NetworkRole = NetworkRole.METADATA,
     action: (NetworkRemote) -> Result): Result {
     if (closed) throw NetworkFailure("网络存储服务已经关闭")
-    val slot = slots.computeIfAbsent(Key(source.id, role)) { Slot() }
+    return if (source.protocol == "smb" && source.scope == "server") {
+      action(SmbServerNetworkRemote(source, this, role))
+    } else runBound(source, role, action)
+  }
+
+  internal fun <Result> runBound(source: NetworkSource, role: NetworkRole, action: (NetworkRemote) -> Result): Result {
+    if (closed) throw NetworkFailure("网络存储服务已经关闭")
+    val slot = slots.computeIfAbsent(key(source, role)) { Slot() }
     val requestRevision = slot.revision.get()
     if (!slot.lock.tryLock(3, java.util.concurrent.TimeUnit.SECONDS)) {
       throw NetworkFailure("此网络连接仍在处理请求，请稍后重试")
@@ -113,7 +126,7 @@ internal class NetworkConnections(
           } else {
             if (existing != null && slot.current.compareAndSet(existing, null)) retire(existing.remote)
             val revision = slot.revision.get()
-            val created = Entry(source, create(source))
+            val created = Entry(source, createBound(source))
             if (closed || revision != slot.revision.get() || !slot.current.compareAndSet(null, created)) {
               retire(created.remote)
               throw NetworkFailure("网络存储配置已变化，请重试")
@@ -124,14 +137,18 @@ internal class NetworkConnections(
         } catch (error: Exception) {
           if (!isTransientNetworkFailure(error)) throw error
           if (entry != null) invalidate(source.id, role, entry.remote)
-          if (attempt == 1 || closed || Thread.currentThread().isInterrupted) throw error
+          if (attempt == 1 || role == NetworkRole.THUMBNAIL || closed || Thread.currentThread().isInterrupted) throw error
         }
       }
       throw NetworkFailure("网络存储连接恢复失败")
     } finally { slot.lock.unlock() }
   }
 
-  fun create(source: NetworkSource): NetworkRemote = factory?.invoke(source) ?: when (source.protocol) {
+  fun create(source: NetworkSource): NetworkRemote = if (source.protocol == "smb" && source.scope == "server") {
+    SmbServerNetworkRemote(source, NetworkConnections(factory), NetworkRole.THUMBNAIL, true)
+  } else createBound(source)
+
+  private fun createBound(source: NetworkSource): NetworkRemote = factory?.invoke(source) ?: when (source.protocol) {
     "smb" -> SmbNetworkRemote(source)
     "sftp" -> SftpNetworkRemote(source)
     "webdav" -> WebDavNetworkRemote(source)
@@ -139,9 +156,10 @@ internal class NetworkConnections(
   }
 
   fun invalidate(id: String, role: NetworkRole, expected: NetworkRemote) {
-    val slot = slots[Key(id, role)] ?: return
-    val current = slot.current.get() ?: return
-    if (current.remote === expected && slot.current.compareAndSet(current, null)) retire(expected)
+    slots.entries.filter { it.key.id == id && it.key.role == role }.forEach { (_, slot) ->
+      val current = slot.current.get()
+      if (current?.remote === expected && slot.current.compareAndSet(current, null)) retire(expected)
+    }
   }
 
   fun invalidate(id: String) {

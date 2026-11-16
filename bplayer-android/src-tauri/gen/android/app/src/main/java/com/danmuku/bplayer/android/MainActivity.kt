@@ -23,8 +23,12 @@ import androidx.core.view.WindowInsetsControllerCompat
 class MainActivity : TauriActivity() {
   private var webView: WebView? = null
   private var network: AndroidNetwork? = null
+  private var thumbnails: AndroidThumbnails? = null
   private var playbackAudio: PlaybackAudioFocus? = null
   private var immersive = false
+  private var playbackActive = false
+  private var keepScreenOn = true
+  private var foreground = false
   private var playbackShape = "home"
   private var playbackOrientationOverride = ""
   @Volatile private var playbackBrightness = -1f
@@ -43,6 +47,22 @@ class MainActivity : TauriActivity() {
       playbackShape == "landscape" -> ActivityInfo.SCREEN_ORIENTATION_USER_LANDSCAPE
       playbackShape == "portrait" -> ActivityInfo.SCREEN_ORIENTATION_USER_PORTRAIT
       else -> ActivityInfo.SCREEN_ORIENTATION_USER
+    }
+  }
+
+  private fun clearViewKeepScreenOn(view: android.view.View) {
+    if (view.keepScreenOn) view.keepScreenOn = false
+    if (view is android.view.ViewGroup) {
+      for (index in 0 until view.childCount) clearViewKeepScreenOn(view.getChildAt(index))
+    }
+  }
+
+  private fun applyKeepScreenOn() {
+    val enabled = foreground && playbackActive && keepScreenOn
+    val flag = android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+    if (!enabled) clearViewKeepScreenOn(window.decorView)
+    if ((window.attributes.flags and flag != 0) != enabled) {
+      if (enabled) window.addFlags(flag) else window.clearFlags(flag)
     }
   }
 
@@ -85,6 +105,7 @@ class MainActivity : TauriActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
     enableEdgeToEdge()
     super.onCreate(savedInstanceState)
+    window.decorView.viewTreeObserver.addOnGlobalLayoutListener { applyKeepScreenOn() }
     contentResolver.registerContentObserver(Settings.System.getUriFor(Settings.System.ACCELEROMETER_ROTATION), false, rotationObserver)
     applyPlaybackOrientation()
 
@@ -106,6 +127,10 @@ class MainActivity : TauriActivity() {
     network?.close()
     network = AndroidNetwork(applicationContext, webView, ::ensureNetworkPermission)
     webView.addJavascriptInterface(network!!, "AndroidNetwork")
+    thumbnails?.close()
+    val thumbnailSources = NetworkThumbnailSources(applicationContext)
+    thumbnails = AndroidThumbnails(applicationContext, webView, thumbnailSources::open)
+    webView.addJavascriptInterface(thumbnails!!, "AndroidThumbnails")
     playbackAudio?.close()
     playbackAudio = PlaybackAudioFocus(applicationContext, webView)
     webView.addJavascriptInterface(playbackAudio!!, "AndroidPlaybackAudio")
@@ -146,8 +171,16 @@ class MainActivity : TauriActivity() {
       @JavascriptInterface
       fun setPlaybackActive(on: Boolean) {
         runOnUiThread {
-          if (on) window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-          else window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+          playbackActive = on
+          applyKeepScreenOn()
+        }
+      }
+
+      @JavascriptInterface
+      fun setKeepScreenOn(on: Boolean) {
+        runOnUiThread {
+          keepScreenOn = on
+          applyKeepScreenOn()
         }
       }
 
@@ -174,10 +207,14 @@ class MainActivity : TauriActivity() {
 
   override fun onStart() {
     super.onStart()
+    foreground = true
+    applyKeepScreenOn()
     playbackAudio?.onStart()
   }
 
   override fun onStop() {
+    foreground = false
+    applyKeepScreenOn()
     playbackAudio?.onStop()
     super.onStop()
   }
@@ -187,6 +224,9 @@ class MainActivity : TauriActivity() {
     playbackBrightness = -1f
     window.attributes = window.attributes.apply { screenBrightness = -1f }
     webView?.removeJavascriptInterface("AndroidNetwork")
+    webView?.removeJavascriptInterface("AndroidThumbnails")
+    thumbnails?.close()
+    thumbnails = null
     webView?.removeJavascriptInterface("AndroidPlaybackAudio")
     playbackAudio?.close()
     playbackAudio = null
@@ -195,6 +235,18 @@ class MainActivity : TauriActivity() {
     networkPermissionWaiters.clear()
     webView = null
     super.onDestroy()
+  }
+
+  override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+    super.onConfigurationChanged(newConfig)
+    webView?.let { view ->
+      view.post {
+        if (!isDestroyed) {
+          view.requestLayout()
+          view.invalidate()
+        }
+      }
+    }
   }
 
   override fun onWindowFocusChanged(hasFocus: Boolean) {

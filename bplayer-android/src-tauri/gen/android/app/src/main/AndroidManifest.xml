@@ -34,6 +34,11 @@
             </intent-filter>
         </activity>
 
+        <service
+            android:name=".ThumbnailDecodeService"
+            android:exported="false"
+            android:process=":thumbnails" />
+
         <provider
           android:name="androidx.core.content.FileProvider"
           android:authorities="${applicationId}.fileprovider"

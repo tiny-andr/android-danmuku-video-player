@@ -80,12 +80,21 @@ dependencies {
     implementation("com.google.android.material:material:1.12.0")
     implementation("androidx.lifecycle:lifecycle-process:2.10.0")
     implementation("com.hierynomus:smbj:0.15.0")
+    implementation("com.rapid7.client:dcerpc:0.12.13") {
+        exclude(group = "com.hierynomus", module = "smbj")
+        exclude(group = "org.bouncycastle")
+        exclude(group = "commons-io", module = "commons-io")
+        exclude(group = "org.apache.commons", module = "commons-lang3")
+    }
+    implementation("commons-io:commons-io:2.20.0")
+    implementation("org.apache.commons:commons-lang3:3.18.0")
     implementation("com.hierynomus:sshj:0.41.2")
     implementation("com.squareup.okhttp3:okhttp:4.12.1")
     implementation("org.nanohttpd:nanohttpd:2.3.1")
     implementation("org.bouncycastle:bcprov-jdk18on:1.85.2")
     implementation("org.bouncycastle:bcpkix-jdk18on:1.85")
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303")
     androidTestImplementation("androidx.test.ext:junit:1.1.4")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.5.0")
 }

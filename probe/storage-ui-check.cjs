@@ -55,7 +55,7 @@ const path = require('node:path');
       label:document.getElementById('aPickHere').textContent,
       path:document.getElementById('aFilePath').textContent,
       overflow:document.getElementById('aFileBox').scrollWidth>innerWidth+1,
-      videosDisabled:Array.from(document.querySelectorAll('#aFileList .aRow')).filter(row=>row.querySelector('.aMeta')).every(row=>row.disabled),
+      videosDisabled:Array.from(document.querySelectorAll('#aFileList .aRow')).filter(row=>row.querySelector('.aMeta')&&!row.querySelector('.aArrow')).every(row=>row.disabled),
       width:innerWidth,height:innerHeight
     })`);
     assert.equal(picker.bottomButtons, 1);

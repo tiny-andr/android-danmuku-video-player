@@ -36,7 +36,7 @@ internal class AndroidNetwork(
         reply(id, JSONObject().put("ok", false).put("error", "网络存储请求过大"))
         return@post
       }
-      if (command in setOf("network_permission", "network_discover_smb", "network_test", "network_save", "list_dir", "fs_stat", "read_bytes", "read_text", "scan_folder", "pair_danmaku", "scan_subtitles")) {
+      if (command in setOf("network_permission", "network_discover_smb", "network_smb_shares", "network_test", "network_save", "list_dir", "fs_stat", "read_bytes", "read_text", "scan_folder", "pair_danmaku", "scan_subtitles")) {
         ensurePermission { granted ->
           if (!closed && trustedPage()) {
             if (granted) dispatch(id, command, argsJson)
@@ -101,12 +101,22 @@ internal class AndroidNetwork(
     val entries = connections.create(source).use { it.list("") }
     val path = "/@network/${source.id}"
     return listing(path, entries).put("source", source.json()).put("fingerprintRequired", false)
+      .put("accessVerified", source.scope != "server")
   }
 
   private fun execute(command: String, args: JSONObject): Any? = when (command) {
     "network_permission" -> true
     "network_discover_smb" -> discovery.discoverSmb()
     "network_sources" -> JSONArray().apply { store.all().forEach { put(it.json()) } }
+    "network_smb_shares" -> {
+      val configured = source(args)
+      if (configured.protocol != "smb") throw NetworkFailure("只有 SMB 支持共享枚举")
+      val serverSource = configured.copy(scope = "server", share = "", root = "")
+      val shares = SmbNetworkRemote(serverSource).use { it.shares() }
+      JSONObject().put("accessVerified", false).put("shares", JSONArray().apply {
+        shares.forEach { put(JSONObject().put("name", it.name).put("comment", it.comment)) }
+      })
+    }
     "network_test" -> test(source(args))
     "network_save" -> {
       val source = source(args)
