@@ -22,6 +22,9 @@ internal interface NetworkRemote : Closeable {
   fun list(relative: String): List<RemoteEntry>
   fun stat(relative: String): RemoteStat
   fun open(relative: String, start: Long, length: Long, total: Long): InputStream
+  fun publishAudioCache(videoRelative: String, audioIndex: Int, jobId: String, input: java.io.File,
+    expected: RemoteStat, cancellation: AudioCancellation): String =
+    throw NetworkFailure("此网络存储不支持安全发布音轨缓存")
   fun readAtExact(relative: String, position: Long, buffer: ByteArray, offset: Int, length: Int, total: Long): Int =
     throw NetworkFailure("此网络存储不支持受限随机读取")
 }
@@ -79,7 +82,7 @@ internal class LimitedNetworkStream(
   }
 }
 
-internal enum class NetworkRole { METADATA, MEDIA, THUMBNAIL }
+internal enum class NetworkRole { METADATA, MEDIA, THUMBNAIL, TRANSCODE }
 
 internal class NetworkConnections(
   private val factory: ((NetworkSource) -> NetworkRemote)? = null,

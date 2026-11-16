@@ -261,6 +261,70 @@ internal class WebDavNetworkRemote(private val source: NetworkSource) : NetworkR
     }
   }
 
+  override fun publishAudioCache(videoRelative: String, audioIndex: Int, jobId: String, input: java.io.File,
+    expected: RemoteStat, cancellation: AudioCancellation): String {
+    val names = AudioCacheNames.derive(videoRelative, audioIndex, jobId)
+    val size = AudioCacheTransfer.inputSize(input)
+    cancellation.check()
+    AudioCacheTransfer.verifyVideo(expected, stat(names.video))
+    if (stat(names.final).kind != "missing") throw NetworkFailure("同名音轨缓存已存在，未覆盖任何文件")
+    val temporary = url(names.temporary)
+    val destination = url(names.final)
+    if (!sameOrigin(temporary, destination) || temporary.pathSegments.dropLast(1) != destination.pathSegments.dropLast(1)) {
+      throw NetworkFailure("WebDAV 音轨缓存必须发布到视频同目录")
+    }
+    var created = false
+    var etag: String? = null
+    val publishingClient = streamingClient.newBuilder().retryOnConnectionFailure(false).build()
+    cancellation.onCancel { abort() }
+    try {
+      val body = object : okhttp3.RequestBody() {
+        override fun contentType(): okhttp3.MediaType = "audio/x-matroska".toMediaType()
+        override fun contentLength(): Long = size
+        override fun isOneShot(): Boolean = true
+        override fun writeTo(sink: okio.BufferedSink) {
+          AudioCacheTransfer.copy(input, size, cancellation) { _, bytes, offset, count -> sink.write(bytes, offset, count); count }
+        }
+      }
+      publishingClient.newCall(builder(temporary).header("If-None-Match", "*").put(body).build()).execute().use { response ->
+        if (response.code == 412) throw NetworkFailure("WebDAV 临时缓存冲突，未覆盖任何文件")
+        check(response)
+        if (response.code != 201) throw NetworkFailure("WebDAV 不支持排他创建缓存，已拒绝继续发布")
+        created = true
+        etag = AudioCacheTransfer.strongEtag(response.header("ETag"))
+          ?: throw NetworkFailure("WebDAV 创建缓存未返回强 ETag，已保留专属临时文件并停止发布")
+      }
+      cancellation.check()
+      client.newCall(builder(temporary).head().build()).execute().use { response ->
+        check(response)
+        if (response.code != 200 || response.header("Content-Length")?.toLongOrNull() != size) throw NetworkFailure("WebDAV 临时缓存大小校验失败")
+        val current = AudioCacheTransfer.strongEtag(response.header("ETag"))
+          ?: throw NetworkFailure("WebDAV 未提供强 ETag，无法安全发布；专属临时缓存已保留")
+        if (etag != null && etag != current) throw NetworkFailure("WebDAV 临时缓存已变化，停止发布")
+        etag = current
+      }
+      AudioCacheTransfer.verifyVideo(expected, stat(names.video))
+      cancellation.commit {
+        val move = builder(temporary).header("Destination", destination.toString()).header("Overwrite", "F")
+          .header("If-Match", etag!!).method("MOVE", null).build()
+        publishingClient.newCall(move).execute().use { response ->
+          if (response.code == 412) throw NetworkFailure("WebDAV 正式缓存冲突或临时文件已变化，未覆盖任何文件")
+          check(response)
+          if (response.code != 201) throw NetworkFailure("WebDAV 不支持安全的无覆盖发布")
+        }
+      }
+      return names.final
+    } catch (error: Exception) {
+      if (cancellation.commitAttempted && !cancellation.published) throw NetworkFailure("WebDAV 发布结果未确认或目标冲突，未重试或删除正式缓存；请重新浏览检查")
+      if (created && etag == null) throw NetworkFailure("WebDAV 无法确认临时缓存身份，已保留本任务专属临时文件")
+      throw error
+    } finally {
+      if (created && etag != null && !cancellation.commitAttempted && !closed) {
+        runCatching { client.newCall(builder(temporary).header("If-Match", etag!!).delete().build()).execute().close() }
+      }
+    }
+  }
+
   override fun close() {
     abort()
     client.connectionPool.evictAll()

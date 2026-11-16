@@ -142,6 +142,9 @@
     args = args || {};
     var path = args.path || args.videoPath || args.dir;
     if (command.indexOf("network_") === 0) return request(command, args);
+    if (command === "sidecar_cache_files" && window.AndroidAudioTasks && window.AndroidAudioTasks.currentSession) {
+      return window.AndroidAudioTasks.request("audio_cache_files", { videoPath: args.videoPath, session: window.AndroidAudioTasks.currentSession });
+    }
     if (!isNetwork(path)) return window.__TAURI__.core.invoke(command, args);
     if (command === "probe_mkv_tracks") return Promise.resolve({ tracks: [], duration_us: null });
     if (command === "clean_sidecar_tmp") return Promise.resolve(0);
@@ -411,7 +414,7 @@
         } finally { discover.disabled = false; }
       }, "aDiscovery");
       discover.id = "aDiscoverSmb"; list.append(discover, found);
-      list.appendChild(node("p", "aNote", "SMB 2.1 / 3 · HTTPS WebDAV · SFTP\n只读取文件，不修改服务器内容。连接信息加密保存在本机；视频按需读取，无需整片下载。"));
+      list.appendChild(node("p", "aNote", "SMB 2.1 / 3 · HTTPS WebDAV · SFTP\n连接信息加密保存在本机；播放按需读取。音轨兼容处理会读取整段影片，并在有写权限时将 AAC 缓存保存到视频同目录；原视频不修改。"));
       restorePosition(positions.get(positionKey("sources"))); pageReady = true;
     } catch (error) {
       if (ticket !== generation || mask.hidden) return;

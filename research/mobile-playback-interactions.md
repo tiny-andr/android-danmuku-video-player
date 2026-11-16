@@ -66,9 +66,10 @@
 | Excluded | Hold-to-speed | Explicitly declined by the user; keep the existing speed menu only. |
 | Excluded | Picture-in-picture | Explicitly cancelled by the user. |
 | Deferred | Background playback | Keep background-pause policy; no native media service added in this batch. |
-| Deferred | Additional audio codecs and embedded subtitles | Native audio processing, embedded extraction and PGS remain outside this batch. |
+| Done | Audio compatibility conversion | Selected-track AAC stereo conversion with same-directory local/network cache; see `research/audio-conversion.md` for evidence and limits. |
+| Deferred | Embedded subtitles | Embedded extraction and PGS remain unimplemented. |
 
-本计划不涉及无关的播放器核心重写，也不增加对远程存储的写入操作。
+The playback core is retained. The later audio batch adds only derived audio-cache writes beside videos; original video files remain unchanged.
 
 ## 此前真实验证记录（2026-11-16）
 

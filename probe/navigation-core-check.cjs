@@ -81,7 +81,7 @@ for(const [name,id] of [['refreshAudioMenu','audioPanel']]){
   navigation.open('info');navigation.forward(()=>navigation.open(id));
   const button={hidden:false};
   context.$=()=>button;context.closePanel=panel=>navigation.close(panel);
-  context.fullCacheActive=true;context.subItems=[];
+  context.probeTracks=[];context.subItems=[];
   const start=html.indexOf('    function '+name+'()');
   const end=html.indexOf('      btn.hidden = false;',start);
   assert(start>=0&&end>start);

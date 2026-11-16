@@ -35,8 +35,13 @@ internal data class NetworkByteRange(val start: Long, val end: Long) {
 
 internal class NetworkMediaServer(
   private val store: NetworkSourceStore,
-  private val connections: NetworkConnections
+  private val connections: NetworkConnections,
+  private val role: NetworkRole = NetworkRole.MEDIA,
+  private val allowedPath: String? = null,
+  private val maxReadBytes: Long? = null,
+  private val sourceSnapshot: NetworkSource? = null
 ) : NanoHTTPD("127.0.0.1", 0) {
+  private val bytesRead = java.util.concurrent.atomic.AtomicLong()
   private val token = ByteArray(32).also { SecureRandom().nextBytes(it) }
     .let { Base64.encodeToString(it, Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING) }
   private val active = ConcurrentHashMap<InputStream, String>()
@@ -67,8 +72,11 @@ internal class NetworkMediaServer(
     if (session.method == Method.OPTIONS) return cors(newFixedLengthResponse(Response.Status.NO_CONTENT, MIME_PLAINTEXT, ""))
     try {
       val path = NetworkPaths.parse(String(Base64.decode(pieces[2], Base64.URL_SAFE or Base64.NO_WRAP), Charsets.UTF_8))
-      val source = store.get(path.id)
-      return connections.run(source, NetworkRole.MEDIA) { remote ->
+      if (allowedPath != null && path.virtual != allowedPath) return text(Response.Status.FORBIDDEN, "此代理不允许读取其他文件")
+      val currentSource = store.get(path.id)
+      if (sourceSnapshot != null && currentSource != sourceSnapshot) throw NetworkFailure("连接配置已变化，音轨处理已停止，请重新打开影片")
+      val source = sourceSnapshot ?: currentSource
+      return connections.run(source, role) { remote ->
         val stat = remote.stat(path.relative)
         if (stat.kind != "file") return@run text(Response.Status.NOT_FOUND, "网络媒体文件不存在")
         if (stat.size <= 0L) return@run text(Response.Status.RANGE_NOT_SATISFIABLE, "空文件不能作为媒体播放").apply {
@@ -80,8 +88,8 @@ internal class NetworkMediaServer(
           addHeader("Content-Range", "bytes */${stat.size}"); addHeader("Accept-Ranges", "bytes")
         }
         val input = if (session.method == Method.HEAD || range.length == 0L) ByteArrayInputStream(ByteArray(0))
-          else track(path.id, connections.watch(source, NetworkRole.MEDIA, remote,
-            remote.open(path.relative, range.start, range.length, stat.size)))
+          else track(path.id, bounded(connections.watch(source, role, remote,
+            remote.open(path.relative, range.start, range.length, stat.size))))
         val response = newFixedLengthResponse(if (header == null) Response.Status.OK else Response.Status.PARTIAL_CONTENT,
           mime(path.relative), input, range.length)
         response.setRequestMethod(session.method)
@@ -92,6 +100,23 @@ internal class NetworkMediaServer(
       }
     } catch (error: Exception) {
       return text(Response.Status.SERVICE_UNAVAILABLE, safeNetworkError(error))
+    }
+  }
+
+  private fun bounded(input: InputStream): InputStream {
+    val limit = maxReadBytes ?: return input
+    return object : FilterInputStream(input) {
+      override fun read(): Int {
+        val buffer = ByteArray(1)
+        return if (read(buffer, 0, 1) < 0) -1 else buffer[0].toInt() and 255
+      }
+      override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+        val remaining = limit - bytesRead.get()
+        if (remaining <= 0) throw NetworkFailure("音轨探测读取已达到 32 MiB 上限")
+        val count = input.read(buffer, offset, minOf(length.toLong(), remaining, 65536L).toInt())
+        if (count > 0 && bytesRead.addAndGet(count.toLong()) > limit) throw NetworkFailure("音轨探测读取超出限制")
+        return count
+      }
     }
   }
 
@@ -139,6 +164,8 @@ internal class NetworkMediaServer(
     "mp4", "m4v" -> "video/mp4"
     "webm" -> "video/webm"
     "mkv" -> "video/x-matroska"
+    "mka" -> "audio/x-matroska"
+    "m4a" -> "audio/mp4"
     "ts" -> "video/mp2t"
     "mov" -> "video/quicktime"
     else -> "application/octet-stream"

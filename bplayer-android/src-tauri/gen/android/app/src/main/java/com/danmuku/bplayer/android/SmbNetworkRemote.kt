@@ -173,6 +173,46 @@ internal class SmbNetworkRemote(private val source: NetworkSource, cancellation:
     return exactFile!!.read(buffer, position, offset, length)
   }
 
+  @Synchronized
+  override fun publishAudioCache(videoRelative: String, audioIndex: Int, jobId: String, input: java.io.File,
+    expected: RemoteStat, cancellation: AudioCancellation): String {
+    val names = AudioCacheNames.derive(videoRelative, audioIndex, jobId)
+    val size = AudioCacheTransfer.inputSize(input)
+    cancellation.check()
+    AudioCacheTransfer.verifyVideo(expected, stat(names.video))
+    if (stat(names.final).kind != "missing") throw NetworkFailure("同名音轨缓存已存在，未覆盖任何文件")
+    checked(names.parent)
+    val temporary = share.openFile(path(names.temporary), setOf(AccessMask.FILE_WRITE_DATA, AccessMask.FILE_READ_ATTRIBUTES, AccessMask.DELETE),
+      EnumSet.noneOf(FileAttributes::class.java), emptySet(), SMB2CreateDisposition.FILE_CREATE,
+      setOf(SMB2CreateOptions.FILE_NON_DIRECTORY_FILE, SMB2CreateOptions.FILE_OPEN_REPARSE_POINT))
+    cancellation.onCancel {
+      if (!cancellation.commitAttempted) runCatching { temporary.deleteOnClose() }
+      abort()
+    }
+    try {
+      AudioCacheTransfer.copy(input, size, cancellation) { position, bytes, offset, count ->
+        val written = temporary.write(bytes, position, offset, count)
+        if (written !in 1..count.toLong()) throw NetworkFailure("SMB 音轨缓存写入长度无效")
+        written.toInt()
+      }
+      temporary.flush()
+      val information = temporary.fileInformation
+      if (information.basicInformation.fileAttributes and reparse != 0L || information.standardInformation.endOfFile != size) {
+        throw NetworkFailure("SMB 临时音轨缓存校验失败")
+      }
+      AudioCacheTransfer.verifyVideo(expected, stat(names.video))
+      checked(names.parent)
+      cancellation.commit { temporary.rename(path(names.final), false) }
+      return names.final
+    } catch (error: Exception) {
+      if (cancellation.commitAttempted && !cancellation.published) throw NetworkFailure("SMB 发布结果未确认，未重试或删除正式缓存；请重新浏览检查")
+      throw error
+    } finally {
+      if (!cancellation.commitAttempted) runCatching { temporary.deleteOnClose() }
+      runCatching { temporary.close() }
+    }
+  }
+
   override fun isConnected(): Boolean = !closed && connection.isConnected && (diskShare?.isConnected ?: true)
 
   override fun abort() { closed = true; sockets.closeAll() }

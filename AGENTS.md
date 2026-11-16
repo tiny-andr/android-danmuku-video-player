@@ -18,6 +18,7 @@ bplayer-android/
     android-navigation.js Overlay stack, task invalidation and scroll anchors
     android-sidecars.js   Bounded text decoding, subtitle normalization and language preferences
     android-subtitle-view.js Atomic text-track loading, safe rendering and per-video timing
+    android-audio.js      Owned native audio tasks and staged external-audio synchronization
     android-file-order.js 自然文件名、修改时间和类型排序
     android-thumbnails.js 可见项封面调度、取消与最近播放缓存读取
     android-gestures.js   播放区域亮度/媒体音量、双击跳转与触摸锁仲裁
@@ -41,13 +42,14 @@ research/
 
 - **前端**：`index.html` 承载播放核心，`android-shell.js` 在它之前加载，负责手机布局与交互；不要重写播放器核心，优先复用现有 DOM/事件（如 `#btnOpenVideo`、`#btnAudioEntry`、`#btnBlockEntry`、`#settingsMask`、`#infobar` 的数值节点）。
 - **选文件**：`window.__aInvoke` 拦截 `pick_video` / `pick_folder`，交由 `android-storage.js` 打开触摸文件浏览器。本地真实路径通过 asset 协议播放；`/@network/<id>/...` 虚拟路径通过原生网络桥与本机 Range 媒体代理播放。
-- **Rust 命令**：`fs_stat`、`pair_danmaku`、`scan_folder`、`read_text`、`read_bytes`、`scan_subtitles`、`probe_mkv_tracks`、`sidecar_cache_files`、`list_dir` 已实现；`pick_*`、`reveal_path`、开机启动、ffmpeg 转码、PGS 相关仍是占位。
+- **Rust / audio commands**: Rust still provides local scanning and text reads. Android audio probe/prepare/start/cancel/cache listing now use `AndroidAudioNative` and `android-audio.js`; do not route them to the legacy Rust transcode stubs. Embedded subtitle extraction and PGS remain unimplemented.
 - **原生桥**：`MainActivity.kt` 通过 `AndroidUI` 提供沉浸式、按视频尺寸选择方向、播放常亮、窗口亮度、媒体音量与退出能力。亮度只改当前窗口，退出播放恢复系统亮度；音量使用 Android 媒体音量，不用网页音量伪装。
   Native and top Back share `window.__aAndroidBack()`: touch-lock/resume decision, file-browser hierarchy, loading/pending-task cancellation, top overlay, playback origin, then app exit. Playback must restore its launch origin, not hard-code home or derive a directory from the media path.
 - **Navigation**: `android-navigation.js` owns registered layers; use open/close/clear rather than independent DOM toggles. Information-card children restore their caller; direct controls return to playback. `AndroidFiles.takeSelection(path)` transfers a one-shot immutable browser snapshot; `restore(snapshot)` returns a picker promise. Episode changes retain the session origin; explicit folder lists retain their browser caller. See `research/navigation-return-rules.md`.
 - **Sidecar selection**: Subtitle and danmaku pickers do not change the playback origin. Claim selection ownership only after a non-empty picker result; cancellation must preserve automatic loading. Valid manual choices invalidate older automatic results. Local and network text reads are bounded to 32 MiB. Stage a new subtitle track before replacing the current one, render cue text with textContent, and revoke tracks/Blob URLs on replacement or exit. ASS/SSA are text/time compatible only, not full styled libass rendering. Delay resets per video; style/language persist only through the explicit Save button.
 - **Scope decisions**: PiP and hold-to-speed were declined. The subtitle batch adds no native media dependencies. After its commit, the user approved starting the Windows Bplayer audio-conversion port: convert only the selected unsupported audio track, keep the video unchanged and store the completed audio cache beside the video, including writable network sources. Background services remain deferred.
 - **Subtitle layout**: Default to small (18 CSS px), no outline and the visible video picture's inside bottom, not the player window bottom. A below-picture option falls back inside when letterbox space is insufficient. Recompute from real video dimensions and contain/cover bounds on resize, fold, metadata, fit and control changes; persist position only through Save.
+- **Audio conversion**: `AndroidAudioNative` serializes UUID session/permit/job tasks; a null jobId means session-wide cancellation, not the string `null`. Use job tombstones and source-configuration snapshots. The bound, non-exported `:audio_transcode` worker uses locked LGPL FFmpeg min plus its explicitly restored smart-exception dependency. Convert only selected audio to AAC-LC stereo 192k; final `Video (音轨N).mka` stays beside the source. Keep video audio isolated until its default track is known; stage/seek external audio before allowing sound. Never replace a source video or conflicting cache. Remote publication requires exclusive temporary creation and no-overwrite rename/MOVE; do not retry an ambiguous commit or reuse the playback connection pool. Private staging is capped at 512 MiB, cleaned on exit/replacement, and local disk preflight reserves two copies. See `research/audio-conversion.md`.
 - **网络存储**：`AndroidNetwork` 提供异步请求和流式媒体 URL；连接凭据使用 Android Keystore 加密，网页只接收公开字段。SMB 仅启用 2.1/3.x，WebDAV 仅 HTTPS，SFTP 必须核对主机指纹；禁止跳过证书或指纹校验。详细结构见 `research/network-storage.md`。
 - **方向策略**：Manifest 为 `user`。首页遵守系统旋转设置，禁止使用 `fullSensor` 绕过旋转锁。关闭系统自动旋转时播放保持当前方向；开启时，视频宽 > 高使用横屏，宽 ≤ 高使用竖屏。顶部“横屏／竖屏”是用户主动覆盖方向的入口，随控件显隐，不修改系统开关；退出或换片清除覆盖。等待真实视频尺寸后才选默认方向，退出播放恢复系统策略。
 - **播放控制栏**：弹幕插件通过 `mount()` 固定到 `.mDanControls`，不要让窄屏自动把工具栏移到画面底边。顶部不再重复放弹幕开关；横竖屏的底部开关和设置均保留，控制区使用高不透明黑色背景。
@@ -79,7 +81,7 @@ adb shell monkey -p com.danmuku.bplayer.android -c android.intent.category.LAUNC
 
 已验证：异形契约（6.11 GB MP4，1920×1080）播放；23,159 条 B 站弹幕 271–293 ms 解析；竖屏首页与横屏播放切换；沉浸式；文件夹 10 集连播；同源换集；返回键层级；最近播放去重；信息卡与设置页手机布局。
 
-限制（P3 起）：DTS/TrueHD/AC-3 等 WebView 无法解码，ffmpeg 转码未接入；内嵌文本字幕抽取、PGS 位图字幕未实现；`自动转换音轨/字幕` 开关目前只持久化设置，不会真正转码（设置页已注明）；MKV 外挂音轨/PGS 仍为占位命令。
+Audio conversion now works through the Android native bridge: local DTS/TrueHD/AC-3 fixtures and a real SMB same-directory write/cache-reuse path were verified. Embedded text subtitle extraction and PGS remain unimplemented. AC-4/DRA are not certified; unsupported converters fail explicitly. WebDAV/SFTP publishing code is compiled and covered by shared transfer tests but has not been certified against a live server. Read-only sources or servers missing safe conditional publication/mtime fail without overwriting files. The source fingerprint is bounded, not a full cryptographic file scan.
 
 ## 注意的坑
 

@@ -25,6 +25,7 @@ class MainActivity : TauriActivity() {
   private var network: AndroidNetwork? = null
   private var thumbnails: AndroidThumbnails? = null
   private var playbackAudio: PlaybackAudioFocus? = null
+  private var audioNative: AndroidAudioNative? = null
   private var immersive = false
   private var playbackActive = false
   private var keepScreenOn = true
@@ -127,6 +128,10 @@ class MainActivity : TauriActivity() {
     network?.close()
     network = AndroidNetwork(applicationContext, webView, ::ensureNetworkPermission)
     webView.addJavascriptInterface(network!!, "AndroidNetwork")
+    audioNative?.close()
+    audioNative = AndroidAudioNative(applicationContext, webView)
+    audioNative?.setForeground(foreground)
+    webView.addJavascriptInterface(audioNative!!, "AndroidAudioNative")
     thumbnails?.close()
     val thumbnailSources = NetworkThumbnailSources(applicationContext)
     thumbnails = AndroidThumbnails(applicationContext, webView, thumbnailSources::open)
@@ -210,12 +215,14 @@ class MainActivity : TauriActivity() {
     foreground = true
     applyKeepScreenOn()
     playbackAudio?.onStart()
+    audioNative?.setForeground(true)
   }
 
   override fun onStop() {
     foreground = false
     applyKeepScreenOn()
     playbackAudio?.onStop()
+    audioNative?.setForeground(false)
     super.onStop()
   }
 
@@ -223,6 +230,9 @@ class MainActivity : TauriActivity() {
     contentResolver.unregisterContentObserver(rotationObserver)
     playbackBrightness = -1f
     window.attributes = window.attributes.apply { screenBrightness = -1f }
+    webView?.removeJavascriptInterface("AndroidAudioNative")
+    audioNative?.close()
+    audioNative = null
     webView?.removeJavascriptInterface("AndroidNetwork")
     webView?.removeJavascriptInterface("AndroidThumbnails")
     thumbnails?.close()

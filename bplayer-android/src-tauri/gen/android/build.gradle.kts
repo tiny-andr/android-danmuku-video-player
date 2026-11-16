@@ -11,6 +11,13 @@ buildscript {
 
 allprojects {
     repositories {
+        maven("https://maven.aliyun.com/repository/central") {
+            content {
+                includeModule("dev.ffmpegkit-maintained", "ffmpeg-kit-min")
+                includeModule("com.arthenica", "smart-exception-java")
+                includeModule("com.arthenica", "smart-exception-common")
+            }
+        }
         google()
         mavenCentral()
     }

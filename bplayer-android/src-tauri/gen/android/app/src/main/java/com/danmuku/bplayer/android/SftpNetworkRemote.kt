@@ -131,6 +131,43 @@ internal class SftpNetworkRemote(private val source: NetworkSource) : NetworkRem
     }
   }
 
+  @Synchronized
+  override fun publishAudioCache(videoRelative: String, audioIndex: Int, jobId: String, input: java.io.File,
+    expected: RemoteStat, cancellation: AudioCancellation): String {
+    val names = AudioCacheNames.derive(videoRelative, audioIndex, jobId)
+    val size = AudioCacheTransfer.inputSize(input)
+    cancellation.check()
+    AudioCacheTransfer.verifyVideo(expected, stat(names.video))
+    if (stat(names.final).kind != "missing") throw NetworkFailure("同名音轨缓存已存在，未覆盖任何文件")
+    val parent = checked(names.parent)
+    val temporaryPath = parent.trimEnd('/') + "/" + names.temporary.substringAfterLast('/')
+    val finalPath = parent.trimEnd('/') + "/" + names.final.substringAfterLast('/')
+    var created = false
+    cancellation.onCancel { abort() }
+    try {
+      sftp.open(temporaryPath, setOf(OpenMode.CREAT, OpenMode.EXCL, OpenMode.WRITE)).use { temporary ->
+        created = true
+        AudioCacheTransfer.copy(input, size, cancellation) { position, bytes, offset, count ->
+          temporary.write(position, bytes, offset, count)
+          count
+        }
+        val attributes = temporary.fetchAttributes()
+        if (attributes.type != FileMode.Type.REGULAR || attributes.size != size) throw NetworkFailure("SFTP 临时音轨缓存校验失败")
+      }
+      cancellation.check()
+      if (checked(names.parent) != parent || checked(names.temporary) != temporaryPath) throw NetworkFailure("SFTP 缓存路径发生变化")
+      val attributes = sftp.lstat(temporaryPath)
+      if (attributes.type != FileMode.Type.REGULAR || attributes.size != size) throw NetworkFailure("SFTP 临时缓存关闭后校验失败")
+      AudioCacheTransfer.verifyVideo(expected, stat(names.video))
+      cancellation.commit { sftp.rename(temporaryPath, finalPath, emptySet()) }
+      return names.final
+    } catch (error: Exception) {
+      if (cancellation.commitAttempted && !cancellation.published) throw NetworkFailure("SFTP 发布结果未确认，未重试或删除正式缓存；请重新浏览检查")
+      if (created) throw NetworkFailure("SFTP 音轨缓存未发布；为避免误删，已保留本任务专属临时文件（${error.javaClass.simpleName}）")
+      throw error
+    }
+  }
+
   override fun close() { abort(); runCatching { sftp.close() }; runCatching { ssh.close() } }
 
   companion object {

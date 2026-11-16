@@ -346,8 +346,10 @@
       <span class="spacer"></span>
       <button type="button" id="audioClose" title="关闭">✕</button>
     </div>
+    <div id="audioStatus" class="block-foot" role="status"></div>
     <div id="audioTrackList"></div>
-    <div class="block-foot">点击切换音轨 · 首次切换需后台把该音轨转成 AAC 外挂音频</div>
+    <button type="button" id="audioCancel" class="sidecar-action" hidden>取消本次音轨处理</button>
+    <div class="block-foot">只处理选中的音轨，视频和弹幕保持不变。完成的 AAC 音频保存为同目录 .mka 缓存；首次处理需等待。AC-4／DRA 等转换器不支持的编码会明确报错。</div>
   </div>
 
   <div class="block-panel" id="subtitlePanel" hidden>
@@ -412,7 +414,7 @@
 
       <div class="settings-row">
         <label><input type="checkbox" id="optAutoAudio" /> 自动转换不支持的音轨</label>
-        <div class="settings-desc">开片时若音轨内核解不了（DTS / TrueHD / AC-4 等），后台转成 AAC 外挂音轨。关闭后不自动转，需要在「音轨」菜单里点那条轨道才开始。</div>
+        <div class="settings-desc">自动处理默认音轨，不会改选其它语言或评论轨。关闭后仍可复用已验证的同目录 .mka 缓存；需要新转换时可到音轨菜单明确选择。</div>
       </div>
 
       <div class="settings-row">
@@ -430,6 +432,7 @@
 <script src="vendor/artplayer-plugin-danmuku.js"></script>
 <script src="vendor/artplayer-plugin-audio-track.js"></script>
 <script src="android-navigation.js"></script>
+<script src="android-audio.js"></script>
 <script src="android-file-order.js"></script>
 <script src="android-thumbnails.js"></script>
 <script src="android-storage.js"></script>
@@ -760,7 +763,11 @@
     art.url = url;
 
     // 外挂音轨：audio-track 插件，独立 Audio 元素跟随视频时钟（工厂函数直接接线，不走插件管理器）
-    audioTrack = artplayerPluginAudioTrack({ url: '' })(art);
+    audioTrack = window.AndroidAudioTrack.create(art);
+    art.on('destroy', function () {
+      if (audioTrack) audioTrack.dispose();
+      if (window.__BplayerDesktop) window.__BplayerDesktop.cancelAudio();
+    });
 
     mountDensityControl();   // 弹幕密度入口挂在控制栏右列（齿轮左边）
 
@@ -788,13 +795,15 @@
     });
   }
 
-  function setVideoFromUrl(url, name, size) {
+  function setVideoFromUrl(url, name, size, beforePlay) {
     if (window.AndroidPlayback) window.AndroidPlayback.source(url);
     if (currentVideoName !== name) danmakuLoadToken++; // 作废仍在解析的旧弹幕任务
     currentVideoName = name;
     if (!art) {
       createPlayer(url);
+      if (beforePlay) beforePlay();
     } else {
+      if (beforePlay) beforePlay();
       art.url = url; // Artplayer 切换视频源
     }
     placeholder.classList.add('hide');
@@ -1422,125 +1431,89 @@
       return c;
     }
 
-    // 内核（Chromium）没有 DTS / TrueHD / AC-4 / DRA 解码器
-    function isDeadCodec(codec) {
-      var c = String(codec || '').toUpperCase();
-      return c.indexOf('A_DTS') === 0 || c === 'A_TRUEHD' || c === 'A_AC4' || c === 'A_DRA';
-    }
+    var audioSession = null;
+    var audioSubtitleToken = 0;
 
-    function classifyAudio(tracks) {
-      var audios = (tracks || []).filter(function (t) { return t.kind === 'audio'; });
-      var res = { count: audios.length, dead: 0, deadNames: [], shakyNames: [], audioIndex: -1, defDead: false, pin: false };
-      audios.forEach(function (t, i) {
-        var c = String(t.codec || '').toUpperCase();
-        if (isDeadCodec(c)) { res.dead++; res.deadNames.push(codecName(c)); }
-        else if (c === 'A_AC3' || c === 'A_EAC3' || c.indexOf('A_PCM') === 0) res.shakyNames.push(codecName(c));
-        if (res.audioIndex < 0 && t.default) res.audioIndex = i; // 默认目标：default 音轨，否则第一条
-      });
-      if (res.audioIndex < 0) res.audioIndex = 0;
-      var uniq = function (a) { return a.filter(function (v, i) { return a.indexOf(v) === i; }); };
-      res.deadNames = uniq(res.deadNames);
-      res.shakyNames = uniq(res.shakyNames);
-
-      // 内核的选轨规则是「第一条它能解的」，只有那条恰好是默认轨时行为才正确。
-      // pin = 内核会选中非默认轨（默认轨解不了，或它前面还有别的可解轨），必须由我们接管。
-      var def = audios[res.audioIndex];
-      res.defDead = !!def && isDeadCodec(def.codec);
-      var firstPlayable = -1;
-      for (var i = 0; i < audios.length; i++) {
-        if (!isDeadCodec(audios[i].codec)) { firstPlayable = i; break; }
-      }
-      res.pin = firstPlayable !== res.audioIndex;
-      return res;
-    }
-
-    // 音轨链路诊断：结果累积在 window.__bplayerDiag，出问题时可从 DevTools 直接读
     function diag(step, data) {
       try {
         var log = window.__bplayerDiag || (window.__bplayerDiag = []);
         if (log.length > 200) log.shift();
         log.push(Object.assign({ step: step, at: Math.round(performance.now()) }, data || {}));
-      } catch (e) { }
+      } catch (error) {}
     }
 
-    function handleAudioCodecs(path, name) {
-      if (!/\.(mkv|mka|webm)$/i.test(name)) return;
-      var token = ++probeToken;
-      invoke('probe_mkv_tracks', { path: path }).then(function (probe) {
-        diag('probe', { token: token, now: probeToken, tracks: (probe.tracks || []).length });
-        if (token !== probeToken) { diag('probe-stale'); return; }
-        probeTracks = (probe.tracks || []).filter(function (t) { return t.kind === 'audio'; });
-        probeDurationUs = probe.duration_us || null;
-        try { refreshAudioMenu(); } catch (e) { diag('menu-err', { err: String(e) }); }
-        try { buildSubtitleMenu(path, probe.tracks, token); } catch (e) { diag('sub-err', { err: String(e) }); }
-        var c = classifyAudio(probe.tracks);
-        diag('classify', c);
-        if (!c.count || (!c.dead && !c.shakyNames.length)) { diag('audio-ok-native'); return; }
-        var fullCache = fullAacPath(path);
-        invoke('fs_stat', { path: fullCache }).then(function (st) {
-          diag('fullcache', { kind: st.kind });
-          if (token !== probeToken) { diag('stat-stale'); return; }
-          if (st.kind === 'file') {
-            switchToAudioCache(path, fullCache, st.size, true); // 整片缓存命中：静默换源
-            return;
-          }
-          // c.pin=false：内核「第一条能解的轨道」恰好就是默认轨，交给内核即可
-          if (!c.pin) {
-            diag('audio-native-default');
-            if (c.shakyNames.length) {
-              toast('音轨编码（' + c.shakyNames.join(' / ') + '）解码不可靠（随 WebView2 版本而定），可能无声', 8000);
-            }
-            return;
-          }
-          // 内核会选中非默认轨（默认轨解不了，或它前面还有别的可解轨）。
-          // 绝不让它替用户换轨：先隔离视频音频，宁可静音也不能放出错的轨。
-          diag('audio-pin-required', { idx: c.audioIndex, defDead: c.defDead });
-          isolateVideoAudio();
-          diag('ensure', { idx: c.audioIndex });
-          // manual=false：自动路径。已有 mka 缓存照样直接用，只有需要新转时才看设置开关。
-          try { ensureAudioTrack(path, probeDurationUs, c.audioIndex, c.deadNames.join(' / '), false); }
-          catch (e) { diag('ensure-err', { err: String(e) }); }
-        }).catch(function (e) { diag('fullcache-err', { err: String(e) }); });
-      }).catch(function (e) { diag('probe-err', { err: String(e) }); });
+    function audioStatus(message, busy) {
+      $('audioStatus').textContent = message;
+      $('audioCancel').hidden = !busy;
     }
 
-    // 确保某条音轨的外挂 mka 存在：命中缓存直接挂载（不受设置开关影响），
-    // 未命中才转码；manual=false 且「自动转换」关闭时不启动转码，只静音并提示。
-    function ensureAudioTrack(path, durationUs, audioIdx, label, manual) {
-      // 一旦决定走外挂音轨就先隔离视频音频：Chromium 自己会挑它解得了的那条轨
-      // （潘神实测：它跳过两条 DTS，直接播了第 3 条 AC-3），不隔离就会放出错的轨。
-      isolateVideoAudio();
-      var ordinal = audioIdx + 1;
-      invoke('transcode_target', { videoPath: path, audioIndex: audioIdx }).then(function (mkaPath) {
-        diag('target', { ordinal: ordinal, tail: String(mkaPath).slice(-28) });
-        if (normPath(currentVideoPath) !== normPath(path)) { diag('target-stale'); return; }
-        invoke('fs_stat', { path: mkaPath }).then(function (st) {
-          diag('mka-stat', { kind: st.kind });
-          if (normPath(currentVideoPath) !== normPath(path)) return;
-          if (st.kind === 'file') { engageExternalAudio(path, mkaPath, ordinal, true); return; }
-          if (!manual && !appSettings.autoAudio) {
-            toast('音轨' + ordinal + '（' + label + '）内核无法解码，且没有现成的外挂音轨，已静音。'
-              + '需要声音请到「音轨」菜单点这条轨道开始转换；也可以在设置中开启自动音轨处理', 9000);
-            return;
-          }
-          if (transcodeVideo === normPath(path) && transcodeOrdinal === ordinal) return; // 这条已在转
-          transcodeVideo = normPath(path);
-          transcodeOrdinal = ordinal;
-          updatePill(-1, 0);
-          invoke('transcode_audio_start', { videoPath: path, audioIndex: audioIdx, durationUs: durationUs || null }).then(function () {
-            if (transcodeVideo === normPath(path)) {
-              toast('音轨' + ordinal + '（' + label + '）本内核无法解码，正在后台转换为 AAC 外挂音轨', 6000);
-            }
-          }).catch(function (e) {
-            hidePill();
-            transcodeVideo = '';
-            transcodeOrdinal = -1;
-            toast('音轨转换未能启动：' + e, 8000);
-          });
-        }).catch(function () { });
-      }).catch(function () { });
+    function ensureAudioSession() {
+      if (audioSession) return audioSession;
+      audioSession = window.AndroidAudioSession.create(window.AndroidAudioTasks, {
+        autoEnabled: function () { return appSettings.autoAudio; },
+        probing: function () {
+          audioStatus('正在识别音轨…', false);
+          if (!isolateVideoAudio()) { if (art) art.pause(); audioStatus('无法安全识别默认音轨，播放已暂停，请重新打开影片。', false); }
+        },
+        probe: function (probe) {
+          probeTracks = probe.tracks;
+          probeDurationUs = probe.duration_us;
+          var defaultIndex = probeTracks.findIndex(function (track) { return !!track.default; });
+          if (defaultIndex < 0) defaultIndex = 0;
+          if (!probeTracks.length || defaultIndex === 0 && !window.AndroidAudioSession.codec(probeTracks[0].codec).needsConversion) releaseVideoAudio();
+          refreshAudioMenu();
+          if (probe.allTracks.some(function (track) { return track.kind === 'subtitle'; })) buildSubtitleMenu(currentVideoPath, probe.allTracks, audioSubtitleToken);
+          audioStatus(probeTracks.length ? '点击音轨可处理并切换；自动仅使用默认轨。' : '此文件没有音轨。', false);
+        },
+        resetTrack: function () { if (audioTrack) audioTrack.reset(); externalOrdinal = -1; },
+        isolate: function () {
+          if (!isolateVideoAudio()) throw new Error('无法隔离原视频音频，已拒绝同时播放两条声音');
+        },
+        selecting: function (index) { audioStatus('正在验证音轨' + (index + 1) + ' 的同目录缓存…', true); refreshAudioMenu(); },
+        mount: function (selection) {
+          if (!selection.valid() || !audioTrack) return Promise.reject(new Error('播放器尚未就绪'));
+          if (!isolateVideoAudio()) return Promise.reject(new Error('无法隔离原视频音频'));
+          audioStatus('正在将音轨对齐当前播放位置…', true);
+          return audioTrack.update({ url: mediaUrl(selection.path), offset: selection.offset, valid: selection.valid,
+            onError: selection.onError });
+        },
+        ready: function (selection) {
+          externalOrdinal = selection.audioIndex + 1;
+          hidePill(); refreshAudioMenu();
+          audioStatus('音轨' + externalOrdinal + ' 已挂载，已跟随当前播放进度。' + (selection.legacy ? ' 旧缓存：源版本校验有限。' : ''), false);
+        },
+        disabled: function (selection) {
+          hidePill(); audioStatus('默认音轨需要兼容处理，自动转换已关闭。可点击音轨' + (selection.audioIndex + 1) + ' 手动处理；原轨保持静音，避免误播其它语言。', false);
+        },
+        progress: function (progress) {
+          pillLabel = '音轨'; updatePill(Number(progress.percent), Number(progress.written) || 0);
+          audioStatus('正在处理选中的音轨…' + (progress.percent >= 0 ? ' ' + Math.round(progress.percent) + '%' : ''), true);
+        },
+        error: function (message) { hidePill(); audioStatus(message, false); refreshAudioMenu(); toast(message, 8000); },
+        idle: function () { hidePill(); $('audioCancel').hidden = true; }
+      });
+      return audioSession;
     }
 
+    function handleAudioCodecs(path) {
+      audioSubtitleToken = ++probeToken;
+      buildSubtitleMenu(path, null, audioSubtitleToken);
+      ensureAudioSession().probe();
+    }
+
+    function cancelAudioWork() {
+      if (!audioSession) return;
+      audioSession.cancel();
+      audioStatus('音轨处理已取消，可重新选择音轨重试。', false);
+      refreshAudioMenu();
+    }
+
+    function resetAudioSession() {
+      if (audioSession) audioSession.reset();
+      if (audioTrack) audioTrack.reset();
+      releaseVideoAudio(); externalOrdinal = -1; probeTracks = null; probeDurationUs = null;
+      audioStatus('', false); refreshAudioMenu();
+    }
     // 外挂音轨接管音频时，用 WebAudio（gain=0）隔离 <video> 的音频输出。
     // DTS / DTS-HD 这类编码 WebView2 自己能解核心音轨，不隔离就会和外挂 AAC 双声
     // （实测潘神：video 的元素解码字节数持续增长，说明它确实在出声）。
@@ -1548,17 +1521,17 @@
     var audioSplitter = null;
 
     function isolateVideoAudio() {
-      if (!art || !art.video) return;
+      if (!art || !art.video) return false;
       // 支路已存在（上一部也是死编码音轨）：换文件时 releaseVideoAudio 会把增益
       // 放回 1，这里必须重新压回 0，否则内核自己挑的那条可解码音轨会和外挂 AAC 双声。
       if (audioSplitter) {
         try { audioSplitter.gain.gain.value = 0; } catch (e) { }
         try { if (audioSplitter.ctx.state === 'suspended') audioSplitter.ctx.resume().catch(function () { }); } catch (e) { }
-        return;
+        return true;
       }
       try {
         var Ctx = window.AudioContext || window.webkitAudioContext;
-        if (!Ctx) return;
+        if (!Ctx) return false;
         var ctx = new Ctx();
         var srcNode = ctx.createMediaElementSource(art.video);
         var gain = ctx.createGain();
@@ -1567,9 +1540,9 @@
         gain.connect(ctx.destination);
         if (ctx.state === 'suspended') { ctx.resume().catch(function () { }); }
         audioSplitter = { ctx: ctx, gain: gain };
-        diag('video-audio-isolated');
+        diag('video-audio-isolated'); return true;
       } catch (e) {
-        diag('video-audio-isolate-fail', { err: String(e) });
+        diag('video-audio-isolate-fail', { err: String(e) }); return false;
       }
     }
 
@@ -1580,61 +1553,15 @@
       try { if (audioSplitter.ctx.state === 'suspended') audioSplitter.ctx.resume().catch(function () { }); } catch (e) { }
     }
 
-    // 挂载外挂音频（audio-track 插件用独立 Audio 元素跟视频同步；原音轨无声，不会打架）
-    function engageExternalAudio(path, mkaPath, ordinal, silent) {
-      diag('engage', { hasTrack: !!audioTrack, samePath: normPath(currentVideoPath) === normPath(path) });
-      if (!audioTrack || normPath(currentVideoPath) !== normPath(path)) return;
-      externalOrdinal = ordinal;
-      isolateVideoAudio();
-      audioTrack.update({ url: mediaUrl(mkaPath) });
-      diag('engaged');
-      refreshAudioMenu();
-      if (!silent) toast('音轨' + ordinal + ' 外挂音频已挂载');
-    }
-
     function resetExternalAudio() {
       releaseVideoAudio();
-      if (audioTrack) {
-        try {
-          audioTrack.audio.pause();
-          audioTrack.audio.removeAttribute('src');
-          audioTrack.audio.load();
-        } catch (e) { }
-      }
-      externalOrdinal = -1;
-      refreshAudioMenu();
+      if (audioTrack) audioTrack.reset();
+      externalOrdinal = -1; refreshAudioMenu();
     }
 
-    // 整片 AAC 缓存路径（同名 + " (AAC).mkv"）：用于命中已有缓存，未命中则走外挂音轨
-    function fullAacPath(p) { return String(p).replace(/\.(mkv|mp4|webm)$/i, ' (AAC).$1'); }
-
-    // 换到 (AAC).mkv 整片缓存版：保留播放进度；弹幕/标题仍按原文件
-    function switchToAudioCache(path, cachePath, size, silent) {
-      if (!art || normPath(currentVideoPath) !== normPath(path)) return;
-      resetExternalAudio();
-      fullCacheActive = true;
-      refreshAudioMenu();
-      var t = art.currentTime || 0;
-      art.url = mediaUrl(cachePath);
-      art.once('video:canplay', function () {
-        try { if (t > 0.3) art.currentTime = t; } catch (e) { }
-        try { art.play(); } catch (e) { }
-      });
-      if (size) $('infoSize').textContent = fmtBytes(size);
-      if (!silent) toast('已切换到 AAC 整片缓存版（播放进度保留）');
-    }
-
-    // ---- 音轨菜单（存在死编码音轨就出现；单轨文件也要入口：没得选，但能看到挂载状态/重试） ----
-    function hasDeadAudio() {
-      return (probeTracks || []).some(function (t) {
-        var c = String(t.codec || '').toUpperCase();
-        return c.indexOf('A_DTS') === 0 || c === 'A_TRUEHD' || c === 'A_AC4' || c === 'A_DRA';
-      });
-    }
     function refreshAudioMenu() {
       var btn = $('btnAudioEntry');
-      var panel = $('audioPanel');
-      if (fullCacheActive || !hasDeadAudio() || !probeTracks || !probeTracks.length) {
+      if (!probeTracks || !probeTracks.length) {
         btn.hidden = true;
         closePanel('audioPanel');
         return;
@@ -1646,13 +1573,16 @@
       probeTracks.forEach(function (t, i) {
         var ordinal = i + 1;
         var item = document.createElement('div');
-        item.className = 'track-item' + (externalOrdinal === ordinal ? ' current' : '');
+        var nativeDefault = !audioSession || !audioSession.state || audioSession.state.selectedIndex < 0;
+        item.className = 'track-item' + (externalOrdinal === ordinal || (nativeDefault && t.default) ? ' current' : '');
         var main = document.createElement('span');
         main.textContent = '音轨' + ordinal + (t.default ? '（默认）' : '');
         item.appendChild(main);
         var meta = document.createElement('span');
         meta.className = 't-meta';
-        meta.textContent = [codecName(String(t.codec || '').toUpperCase()), t.lang].filter(Boolean).join(' · ');
+        var compatibility = window.AndroidAudioSession.codec(t.codec);
+        var processing = audioSession && audioSession.state && audioSession.state.selectedIndex === i && ['preparing', 'starting', 'running', 'mounting'].includes(audioSession.state.phase);
+        meta.textContent = [codecName(String(t.codec || '').toUpperCase()), t.lang, processing ? '处理中' : (compatibility.needsConversion ? '可转 AAC' : '原生可播／可提取切换')].filter(Boolean).join(' · ');
         item.appendChild(meta);
         item.addEventListener('click', function () { switchAudioTrack(i); });
         list.appendChild(item);
@@ -1660,12 +1590,9 @@
     }
 
     function switchAudioTrack(i) {
-      if (fullCacheActive || !hasDeadAudio() || !probeTracks || !probeTracks[i] || !currentVideoPath) return;
-      closePanel('audioPanel');
+      if (!probeTracks || !probeTracks[i] || !currentVideoPath || !window.AndroidPlayback.active) return;
       if (externalOrdinal === i + 1) return;
-      var t = probeTracks[i];
-      var label = codecName(String(t.codec || '').toUpperCase()) || '未知编码';
-      ensureAudioTrack(currentVideoPath, probeDurationUs, i, label, true); // 手动点选：总是允许转码
+      ensureAudioSession().select(i, true);
     }
 
     // ---- 字幕：外挂扫描 + 内嵌抽取（artplayer 原生 srt/ass→VTT 管线，asset 协议带 CORS） ----
@@ -2040,15 +1967,14 @@
       pillEl.classList.add('show');
     }
     function hidePill() { pillEl.classList.remove('show'); }
-    pillEl.addEventListener('click', function () {
-      invoke('transcode_audio_cancel').then(function (ok) {
-        if (ok) { hidePill(); transcodeVideo = ''; transcodeOrdinal = -1; pendingSub = null; toast('已取消后台处理'); }
-      });
-    });
+    pillEl.addEventListener('click', cancelAudioWork);
+    $('audioCancel').addEventListener('click', cancelAudioWork);
 
     var videoLoadToken = 0;
     async function desktopLoadVideo(path, manualDanPath, epIndex, origin) {
       origin = origin || selectionOrigin(path);
+      resetAudioSession();
+      ensureAudioSession().begin(normPath(path));
       resetSidecars();
       folderEntry = false;
       var token = ++videoLoadToken;
@@ -2094,10 +2020,11 @@
       // 上一次被强杀/崩溃会留下 *.tmp.* 半成品，打开这部片时顺手清掉
       try { invoke('clean_sidecar_tmp', { videoPath: path }).catch(function () { }); } catch (e) { }
       unmountPgs(); // 上一部的位图字幕数据（Rust 侧约 30 MB）随换片释放
-      setVideoFromUrl(mediaUrl(path), name, st.size);
+      setVideoFromUrl(mediaUrl(path), name, st.size, function () {
+        if (!isolateVideoAudio()) throw new Error('无法隔离原视频音频，已停止播放以避免误播其它音轨');
+      });
       handleAudioCodecs(path, name);
-      // 外挂字幕扫描对全部视频类型生效（内嵌轨只有 MKV 能探测，由 handleAudioCodecs 补齐）
-      if (!/\.(mkv|mka|webm)$/i.test(name)) buildSubtitleMenu(path, null, ++probeToken);
+
       var autoDanOwner = { video: token, path: currentVideoPath, selection: danmakuSelectionGeneration };
       loadVideoSidecars(path, manualDanPath, epIndex, token, playlistTicket, autoDanOwner).catch(function (error) {
         if (token !== videoLoadToken || !ownsSidecar(autoDanOwner, 'danmaku')) return;
@@ -2153,7 +2080,11 @@
           folderEntry = false; window.AndroidPlayback.restoreOrigin(folderOrigin);
         }
       },
-      cancelLoad: function () { videoLoadToken++; probeToken++; danmakuLoadToken++; resetSidecars(); },
+      cancelLoad: function () { videoLoadToken++; probeToken++; danmakuLoadToken++; resetAudioSession(); resetSidecars(); },
+      get audioState() { return audioSession ? audioSession.state : null; },
+      get audioOutput() { var element = audioTrack && audioTrack.audio; return element ? { time: element.currentTime, paused: element.paused, readyState: element.readyState, rate: element.playbackRate, muted: element.muted, duration: element.duration, track: audioTrack.state, isolated: !!audioSplitter && audioSplitter.gain.gain.value === 0 } : null; },
+      selectAudio: function (index) { return ensureAudioSession().select(index, true); },
+      cancelAudio: cancelAudioWork,
       loadSubtitle: function (path) { return canSelectSidecar() ? loadSubtitlePath(path, false) : Promise.resolve(false); },
       loadDanmaku: function (path) { return canSelectSidecar() ? loadDanmakuPath(path) : Promise.resolve(false); },
       get sidecars() { return { subtitle: mountedSubId, subtitleCount: subtitleView ? subtitleView.count : 0, delay: subtitleDelay, preferences: Object.assign({}, subtitlePreferences), danmaku: activeDanmakuName }; },
@@ -2313,12 +2244,14 @@
 
     // 转码进度/完成/失败事件（Rust 侧 ffmpeg 工作线程发出）
     T.event.listen('transcode://progress', function (ev) {
+      if (window.AndroidPlayback) return;
       var p = ev.payload || {};
       if (normPath(p.video) !== transcodeVideo) return;
       pillLabel = p.kind === 'subtitle' ? '字幕' : '音轨';
       updatePill(p.percent, p.written);
     });
     T.event.listen('transcode://done', function (ev) {
+      if (window.AndroidPlayback) return;
       var p = ev.payload || {};
       hidePill();
       if (normPath(p.video) !== transcodeVideo) {
@@ -2336,10 +2269,11 @@
       } else if (transcodeOrdinal > 0) {
         var ordinal = transcodeOrdinal;
         transcodeOrdinal = -1;
-        engageExternalAudio(p.video, p.out, ordinal, false); // 正播这个文件：直接挂载外挂音频
+        diag('legacy-audio-event-ignored', { ordinal: ordinal });
       }
     });
     T.event.listen('transcode://error', function (ev) {
+      if (window.AndroidPlayback) return;
       var p = ev.payload || {};
       if (normPath(p.video) !== transcodeVideo) return;
       hidePill();

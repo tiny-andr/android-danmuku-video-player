@@ -974,7 +974,7 @@
     var modal = document.querySelector("#settingsMask .settings-modal");
     var head = modal && modal.querySelector(".settings-head");
     if (head && !document.getElementById("mSettingsNote")) {
-      var note = el("div", "settings-desc", "Android 版：音轨 / 字幕自动转换需要后台 ffmpeg，当前版本保留开关，转码在后续版本接入。");
+      var note = el("div", "settings-desc", "Android 版：音轨兼容处理会生成同目录 AAC 缓存，原视频不修改；首次需等待，离开前台会取消。两小时音轨约 173 MB。内嵌字幕自动抽取仍未实现，外挂字幕可直接载入。");
       note.id = "mSettingsNote";
       note.style.paddingLeft = "0";
       head.parentNode.insertBefore(note, head.nextSibling);

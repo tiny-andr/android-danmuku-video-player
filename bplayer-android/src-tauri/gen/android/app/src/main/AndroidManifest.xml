@@ -35,6 +35,11 @@
         </activity>
 
         <service
+            android:name=".AudioDecodeService"
+            android:exported="false"
+            android:process=":audio_transcode" />
+
+        <service
             android:name=".ThumbnailDecodeService"
             android:exported="false"
             android:process=":thumbnails" />
