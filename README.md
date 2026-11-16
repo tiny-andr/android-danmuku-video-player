@@ -1,6 +1,6 @@
 # android-danmuku-video-player
 
-把 Windows 版 Bplayer 移植到 Android：本地与网络存储视频播放，带弹幕与外挂字幕。
+把 [Windows 版 Bplayer](https://github.com/tiny-andr/danmuku-video-player) 移植到 Android：本地与网络存储视频播放，带弹幕与外挂字幕。
 
 <p align="center">
   <img src="docs/home-portrait.jpg" width="44%" alt="首页：竖屏">
