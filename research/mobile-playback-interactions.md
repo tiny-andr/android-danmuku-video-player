@@ -61,11 +61,12 @@
 
 | 优先级 | 功能 | 当前情况与建议 |
 | --- | --- | --- |
-| P2 | 单独选择外挂字幕和弹幕 | 已支持同目录自动配对；文件名不同时，应允许用户明确选择文件。 |
-| P2 | 字幕时间与样式 | 在渲染器支持的范围内，增加字幕延迟、字号和语言偏好。 |
+| Done | Manual external subtitles and danmaku | Select arbitrary local/network directories and filenames without changing the video origin. |
+| Done | Subtitle timing and style | Per-video delay, size/color/outline and explicit-save language preferences. ASS/SSA text compatibility only. |
 | Excluded | Hold-to-speed | Explicitly declined by the user; keep the existing speed menu only. |
-| P2 | 画中画与后台播放服务 | 当前采用切后台暂停策略；若要支持后台播放，需要原生媒体会话和前台服务，不是打开网页全屏选项即可。 |
-| P2 | 更多音频编码 | DTS／TrueHD、内嵌字幕和 PGS 限制仍在。Media3／FFmpeg 接入属于独立工作，不与手势改动混在一起。 |
+| Excluded | Picture-in-picture | Explicitly cancelled by the user. |
+| Deferred | Background playback | Keep background-pause policy; no native media service added in this batch. |
+| Deferred | Additional audio codecs and embedded subtitles | Native audio processing, embedded extraction and PGS remain outside this batch. |
 
 本计划不涉及无关的播放器核心重写，也不增加对远程存储的写入操作。
 
@@ -81,3 +82,7 @@
 - 延迟读取文件信息的测试确认：打开视频立即隐藏首页；取消后回到文件选择器、移除媒体源，并忽略延迟完成的旧结果。文件不存在时保留带重试入口的加载失败页，不闪回首页。
 - 实际读取插件默认字号为 18，自动弹幕加载没有弹出成功提示。
 - Android 系统截图确认竖屏视频画面正常。这台设备的 CDP 截图不包含硬件合成的视频层，因此不能仅凭 CDP 截图的黑色区域判断视频黑屏。
+
+## Manual sidecars and subtitle preferences
+
+See `research/manual-sidecars.md` for the implemented contract, format limits, ownership checks and physical-device evidence. No native media dependency was added.

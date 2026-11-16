@@ -76,7 +76,7 @@ navigation.restoreScroll(container, position);
 assert.equal(container.scrollTop, 60, 'Missing anchors fall back to numeric scroll');
 groups++;
 const html=fs.readFileSync(path.join(__dirname,'../bplayer-android/ui/index.html'),'utf8');
-for(const [name,id] of [['refreshAudioMenu','audioPanel'],['refreshSubtitleMenu','subtitlePanel']]){
+for(const [name,id] of [['refreshAudioMenu','audioPanel']]){
   navigation.register(id,()=>visible.add(id),()=>visible.delete(id));
   navigation.open('info');navigation.forward(()=>navigation.open(id));
   const button={hidden:false};
@@ -89,4 +89,14 @@ for(const [name,id] of [['refreshAudioMenu','audioPanel'],['refreshSubtitleMenu'
   assert.equal(button.hidden,true);assert.equal(navigation.top,'info');
   groups++;
 }
+navigation.register('subtitlePanel',()=>visible.add('subtitlePanel'),()=>visible.delete('subtitlePanel'));
+navigation.open('info');navigation.forward(()=>navigation.open('subtitlePanel'));
+const subtitleButton={hidden:true};context.$=()=>subtitleButton;
+context.currentVideoPath='/storage/example.mp4';context.window.AndroidPlayback={active:true};
+const subtitleStart=html.indexOf('    function refreshSubtitleMenu()');
+const subtitleEnd=html.indexOf("      $('subtitleCount')",subtitleStart);
+assert(subtitleStart>=0&&subtitleEnd>subtitleStart);
+vm.runInContext(html.slice(subtitleStart,subtitleEnd)+'    }\nrefreshSubtitleMenu();',context);
+assert.equal(subtitleButton.hidden,false);assert.equal(navigation.top,'subtitlePanel');
+navigation.close('subtitlePanel');assert.equal(navigation.top,'info');groups++;
 console.log(`Navigation core: ${groups} groups passed`);

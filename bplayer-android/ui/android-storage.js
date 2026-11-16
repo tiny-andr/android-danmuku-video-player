@@ -4,6 +4,18 @@
   var PREFIX = "/@network/";
   var LAST_DIR = "bplayer.android.lastDir";
   var VIDEO = /\.(mp4|m4v|webm|mov|mkv|avi|ts|flv|wmv|mpg|mpeg)$/i;
+  var SUBTITLE = /\.(srt|ass|ssa|vtt)$/i;
+  var DANMAKU = /\.(xml|json)$/i;
+  var MODES = ["file", "dir", "subtitle", "danmaku"];
+  function attachmentMode() { return mode === "subtitle" || mode === "danmaku"; }
+  function useGrid() { return !attachmentMode() && gridView; }
+  function positionKey(route) { return mode + ":" + route; }
+  function acceptsFile(name) {
+    return (mode === "subtitle" ? SUBTITLE : mode === "danmaku" ? DANMAKU : VIDEO).test(name);
+  }
+  function pickerTitle() {
+    return { file: "选择视频", dir: "选择文件夹", subtitle: "选择字幕", danmaku: "选择弹幕" }[mode];
+  }
   var pending = new Map();
   var serial = 0;
   var generation = 0;
@@ -35,7 +47,9 @@
     if (rememberedNetwork !== null && (!rememberedNetwork || isNetwork(rememberedNetwork))) networkDir = rememberedNetwork;
     else if (legacyDir && isNetwork(legacyDir)) networkDir = legacyDir;
   } catch (error) {}
-  function routeKey() { return page === "sources" ? "sources" : page === "directory" ? requestedDir : ""; }
+  function routeKey() {
+    return page === "sources" ? positionKey("sources") : page === "directory" ? positionKey(requestedDir) : "";
+  }
   function capturePosition() {
     var fallback = { path: "", offset: 0, scrollTop: list ? list.scrollTop : 0 };
     if (!list) return fallback;
@@ -64,9 +78,9 @@
     var position = copyPosition(positions.get(routeKey()) || capturePosition());
     return Object.freeze({ version: 1, mode: mode, section: section, requestedDir: requestedDir,
       sourceId: isNetwork(requestedDir) ? requestedDir.slice(PREFIX.length).split("/")[0] : "",
-      sort: sortKey, descending: sortDescending, grid: gridView, position: position,
+      sort: sortKey, descending: sortDescending, grid: useGrid(), position: position,
       selectedPath: path, localDir: localDir, networkDir: networkDir,
-      sourcesPosition: copyPosition(positions.get("sources")) });
+      sourcesPosition: copyPosition(positions.get(positionKey("sources"))) });
   }
   function persistDirectory(dir) {
     if (isNetwork(dir)) networkDir = dir; else localDir = dir;
@@ -220,7 +234,7 @@
     sort.addEventListener("change", function () { sortKey = sort.value; sortDescending = sortKey === "modified"; saveView(); renderEntries(currentEntries); });
     sortLabel.appendChild(sort);
     var direction = button("", function () { sortDescending = !sortDescending; saveView(); renderEntries(currentEntries); }); direction.id = "aFileDirection";
-    var view = button("", function () { gridView = !gridView; saveView(); renderEntries(currentEntries); }); view.id = "aFileView";
+    var view = button("", function () { if (attachmentMode()) return; gridView = !gridView; saveView(); renderEntries(currentEntries); }); view.id = "aFileView";
     tools.append(sortLabel, direction, view);
     list = node("div"); list.id = "aFileList"; list.setAttribute("role", "region"); list.setAttribute("aria-label", "文件列表");
     list.setAttribute("aria-live", "polite");
@@ -296,7 +310,7 @@
       cwd = result.dir || dir;
       requestedDir = cwd; persistDirectory(cwd);
       pathLabel.textContent = prettyPath(cwd); pathLabel.title = pathLabel.textContent;
-      renderEntries(result.entries || [], positions.get(cwd)); pageReady = true; updateFooter(true);
+      renderEntries(result.entries || [], positions.get(positionKey(cwd))); pageReady = true; updateFooter(true);
     } catch (error) {
       if (ticket !== generation || mask.hidden) return;
       cwd = ""; updateFooter(false);
@@ -313,23 +327,30 @@
     clearThumbnails();
     currentEntries = entries;
     list.replaceChildren(); list.scrollTop = 0;
-    list.classList.toggle("is-grid", gridView);
+    var displayedGrid = useGrid();
+    list.classList.toggle("is-grid", displayedGrid);
     document.getElementById("aFileTools").hidden = false;
-    document.getElementById("aFileView").textContent = gridView ? "列表" : "预览图";
-    document.getElementById("aFileView").setAttribute("aria-label", gridView ? "切换为列表" : "切换为预览图");
-    document.getElementById("aFileView").setAttribute("aria-pressed", String(gridView));
+    document.getElementById("aFileView").hidden = attachmentMode();
+    document.getElementById("aFileView").textContent = displayedGrid ? "列表" : "预览图";
+    document.getElementById("aFileView").setAttribute("aria-label", displayedGrid ? "切换为列表" : "切换为预览图");
+    document.getElementById("aFileView").setAttribute("aria-pressed", String(displayedGrid));
     document.getElementById("aFileDirection").textContent = sortKey === "modified" ? (sortDescending ? "新→旧" : "旧→新") : (sortDescending ? "降序 ↓" : "升序 ↑");
-    entries = entries.filter(function (entry) { return entry.is_dir || VIDEO.test(entry.name); });
+    entries = entries.filter(function (entry) { return entry.is_dir || acceptsFile(entry.name); });
     entries = window.AndroidFileOrder.sort(entries, sortKey, sortDescending);
-    if (!entries.length) { status("此文件夹没有视频或子文件夹" + (mode === "dir" ? "\n仍可使用下方按钮选择它" : "")); return; }
+    if (!entries.length) {
+      var empty = mode === "subtitle" ? "此文件夹没有字幕或子文件夹（SRT / ASS / SSA / VTT）" :
+        mode === "danmaku" ? "此文件夹没有弹幕或子文件夹（XML / JSON）" :
+        "此文件夹没有视频或子文件夹" + (mode === "dir" ? "\n仍可使用下方按钮选择它" : "");
+      status(empty); return;
+    }
     entries.forEach(function (entry) {
       var row = button("", function () { if (entry.is_dir) navigate(entry.path); else if (mode !== "dir") close(entry.path); }, "aRow");
       row.dataset.path = entry.path;
-      if (!entry.is_dir && gridView) {
+      if (!entry.is_dir && displayedGrid) {
         var image = node("img", "aFileThumb"); image.alt = ""; row.appendChild(image);
         if (window.AndroidThumbnailsView) thumbnailCleanups.push(window.AndroidThumbnailsView.observe(image, entry.path, { size: entry.size, modified_ms: entry.modified_ms }));
       }
-      row.appendChild(node("span", "aFileIcon", entry.is_dir ? "▰" : "▷"));
+      row.appendChild(node("span", "aFileIcon", entry.is_dir ? "▰" : mode === "subtitle" ? "字" : mode === "danmaku" ? "弹" : "▷"));
       var detail = node("span", "aFileDetail");
       detail.appendChild(node("span", "aName", entry.name)); row.title = entry.name;
       var modified = window.AndroidFileOrder.timestamp(entry);
@@ -391,7 +412,7 @@
       }, "aDiscovery");
       discover.id = "aDiscoverSmb"; list.append(discover, found);
       list.appendChild(node("p", "aNote", "SMB 2.1 / 3 · HTTPS WebDAV · SFTP\n只读取文件，不修改服务器内容。连接信息加密保存在本机；视频按需读取，无需整片下载。"));
-      restorePosition(positions.get("sources")); pageReady = true;
+      restorePosition(positions.get(positionKey("sources"))); pageReady = true;
     } catch (error) {
       if (ticket !== generation || mask.hidden) return;
       status(error.message, showSources);
@@ -535,9 +556,10 @@
     if (window.AndroidNavigation && window.AndroidNavigation.invalidate) window.AndroidNavigation.invalidate();
     if (resolvePicker) close(null);
     selection = null;
-    mode = value === "dir" ? "dir" : "file"; mask.hidden = false;
+    mode = MODES.includes(value) ? value : "file"; mask.hidden = false;
     pageReady = false;
-    document.getElementById("aPickerTitle").textContent = mode === "dir" ? "选择文件夹" : "选择视频";
+    document.getElementById("aPickerTitle").textContent = pickerTitle();
+    document.getElementById("aFileView").hidden = attachmentMode();
     return new Promise(function (resolve) { resolvePicker = resolve; });
   }
   function open(value, startSection, startDir) {
@@ -552,19 +574,20 @@
     return selected;
   }
   function restore(saved) {
-    if (!saved || saved.version !== 1 || !["file", "dir"].includes(saved.mode) ||
+    if (!saved || saved.version !== 1 || !MODES.includes(saved.mode) ||
       !["local", "network"].includes(saved.section) || typeof saved.requestedDir !== "string") {
       return Promise.resolve(null);
     }
     var result = beginPicker(saved.mode);
     sortKey = ["name", "modified", "type"].includes(saved.sort) ? saved.sort : "name";
-    sortDescending = saved.descending === true; gridView = saved.grid === true;
+    sortDescending = saved.descending === true;
+    if (!attachmentMode()) gridView = saved.grid === true;
     document.getElementById("aFileSort").value = sortKey; saveView();
     if (typeof saved.localDir === "string" && saved.localDir && !isNetwork(saved.localDir)) localDir = saved.localDir;
     if (typeof saved.networkDir === "string" && (!saved.networkDir || isNetwork(saved.networkDir))) networkDir = saved.networkDir;
-    positions.set("sources", copyPosition(saved.sourcesPosition));
+    positions.set(positionKey("sources"), copyPosition(saved.sourcesPosition));
     if (saved.requestedDir) {
-      positions.set(saved.requestedDir, copyPosition(saved.position));
+      positions.set(positionKey(saved.requestedDir), copyPosition(saved.position));
       navigate(saved.requestedDir);
     } else if (saved.section === "network") showSources(); else showLocal();
     return result;

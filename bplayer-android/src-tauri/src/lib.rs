@@ -2,7 +2,24 @@
 // 文件模型：All-files 权限下直接读写 /sdcard 真实路径，asset 协议负责流式播放。
 use serde::Serialize;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
+
+const MAX_SIDECAR_BYTES: u64 = 32 * 1024 * 1024;
+
+fn read_sidecar(path: &Path) -> Result<Vec<u8>, String> {
+    let input = fs::File::open(path).map_err(|error| error.to_string())?;
+    let metadata = input.metadata().map_err(|error| error.to_string())?;
+    if !metadata.is_file() || metadata.len() > MAX_SIDECAR_BYTES {
+        return Err("附件不是普通文件或超过 32 MiB 限制".into());
+    }
+    let mut bytes = Vec::new();
+    input.take(MAX_SIDECAR_BYTES + 1).read_to_end(&mut bytes).map_err(|error| error.to_string())?;
+    if bytes.len() as u64 > MAX_SIDECAR_BYTES {
+        return Err("附件超过 32 MiB 读取限制".into());
+    }
+    Ok(bytes)
+}
 
 mod mkv_probe;
 
@@ -110,7 +127,7 @@ fn scan_subtitles(video_path: String) -> Vec<SubFile> {
 /// 读取文件字节并以 base64 返回（字幕编码探测用）。
 #[tauri::command]
 fn read_bytes(path: String) -> Result<String, String> {
-    let bytes = fs::read(&path).map_err(|e| e.to_string())?;
+    let bytes = read_sidecar(Path::new(&path))?;
     Ok(b64_encode(&bytes))
 }
 
@@ -156,7 +173,7 @@ fn pair_danmaku(video_path: String) -> Option<DanmakuPayload> {
         }
     }
     let (_, p) = best?;
-    let bytes = fs::read(&p).ok()?;
+    let bytes = read_sidecar(&p).ok()?;
     Some(DanmakuPayload {
         name: p.file_name()?.to_string_lossy().to_string(),
         text: String::from_utf8_lossy(&bytes).into_owned(),
@@ -223,7 +240,7 @@ fn scan_folder(dir: String) -> FolderScan {
 
 #[tauri::command]
 fn read_text(path: String) -> Result<String, String> {
-    let bytes = fs::read(&path).map_err(|e| e.to_string())?;
+    let bytes = read_sidecar(Path::new(&path))?;
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 

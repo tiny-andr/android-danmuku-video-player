@@ -131,7 +131,7 @@
       ".mi-k{color:#8b95ab;flex:none;}" +
       ".mi-v{color:#e8ecf5;text-align:right;overflow:hidden;text-overflow:ellipsis;" +
       "white-space:nowrap;font-variant-numeric:tabular-nums;}" +
-      ".mi-actions{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;}" +
+      ".mi-actions{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;}" +
       ".mi-actions button{min-height:44px;border-radius:10px;border:1px solid rgba(255,255,255,.14);" +
       "background:rgba(255,255,255,.06);color:#dfe5f2;font-family:inherit;font-size:12px;padding:4px;}" +
       ".mi-actions button:active{background:rgba(251,114,153,.25);}" +
@@ -555,6 +555,7 @@
       '<div class="mi-actions">' +
         '<button type="button" id="mActAudio">音轨</button>' +
         '<button type="button" id="mActSub">字幕</button>' +
+        '<button type="button" id="mActDanmaku">载入弹幕</button>' +
         '<button type="button" id="mActBlock">弹幕屏蔽</button>' +
         '<button type="button" id="mActSettings">设置</button>' +
       '</div>';
@@ -573,6 +574,7 @@
     document.getElementById("mActSub").addEventListener("click", function () {
       forward("btnSubtitleEntry");
     });
+    document.getElementById("mActDanmaku").addEventListener("click", function () { forward("btnDanmakuEntry"); });
     document.getElementById("mActBlock").addEventListener("click", function () {
       forward("btnBlockEntry");
     });
@@ -982,7 +984,7 @@
   function boot() {
     buildHome();
     buildTopbar();
-    ["audioPanel", "subtitlePanel", "densityPanel", "blockPanel", "settingsMask"].forEach(function (id) {
+    ["audioPanel", "subtitlePanel", "danmakuPanel", "densityPanel", "blockPanel", "settingsMask"].forEach(function (id) {
       navigation.register(id, function () { document.getElementById(id).hidden = false; }, function () { document.getElementById(id).hidden = true; });
     });
     navigation.register("mInfo", function () { fillInfo(); infoPanel.hidden = false; }, function () { infoPanel.hidden = true; });

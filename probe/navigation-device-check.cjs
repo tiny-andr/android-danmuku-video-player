@@ -32,6 +32,7 @@ const path = require('node:path');
   }
   const report = [];
   try {
+    await until('window.AndroidPlayback&&window.__BplayerDesktop&&document.readyState!=="loading"');
     assert.equal(await evaluate('AndroidPlayback.active'), false, 'Do not interrupt existing playback');
     await evaluate(`(async()=>{
       if(document.visibilityState!=='visible')throw new Error('Unlock the phone before running navigation tests');

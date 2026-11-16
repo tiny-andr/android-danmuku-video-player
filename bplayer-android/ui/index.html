@@ -263,6 +263,13 @@
   ::-webkit-scrollbar-track { background: var(--bg); }
   ::-webkit-scrollbar-thumb { background: #2a2e37; border-radius: 5px; border: 2px solid var(--bg); }
   ::-webkit-scrollbar-thumb:hover { background: var(--accent); }
+.sidecar-action{width:100%;min-height:44px;margin:6px 0;border:1px solid #ffffff24;border-radius:10px;background:#ffffff0b;color:inherit;font:inherit;padding:9px 12px;text-align:left;}
+.subtitle-options{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:10px;margin-top:12px;border-top:1px solid #ffffff20;padding-top:12px;}
+.subtitle-options label{display:flex;align-items:center;justify-content:space-between;gap:8px;min-width:0;font-size:13px;}
+.subtitle-options input,.subtitle-options select,.subtitle-options button{box-sizing:border-box;min-height:44px;min-width:0;max-width:100%;border:1px solid #ffffff28;border-radius:9px;padding:6px 8px;background:#171c29;color:#eef0fa;font:inherit;}
+.subtitle-options input{width:80px;}.subtitle-options select{max-width:65%;}.subtitle-options .block-foot{grid-column:1/-1;}.subtitle-options #subtitleLanguage{max-width:60%;}.subtitle-options label:has(#subtitleLanguage),#subtitleSave{grid-column:1/-1;}
+#subtitleStatus,#danmakuStatus{overflow-wrap:anywhere;}#subtitlePanel #subtitleList{max-height:26vh;overflow:auto;}
+@media(max-width:360px){.subtitle-options{grid-template-columns:minmax(0,1fr);}}
 </style>
 </head>
 <body>
@@ -303,6 +310,7 @@
     <div class="info-item"><span class="info-k">当前进度</span><span class="info-v" id="infoTime">—</span></div>
     <button type="button" class="btn-block" id="btnSubtitleEntry" title="选择字幕" hidden>📝 字幕</button>
     <button type="button" class="btn-block" id="btnAudioEntry" title="选择音轨" hidden>🎵 音轨</button>
+    <button type="button" class="btn-block" id="btnDanmakuEntry" title="载入弹幕文件">💬 载入弹幕</button>
     <button type="button" class="btn-block" id="btnBlockEntry" title="设置弹幕屏蔽词">🚫 弹幕屏蔽</button>
   </div>
 
@@ -349,8 +357,28 @@
       <span class="spacer"></span>
       <button type="button" id="subtitleClose" title="关闭">✕</button>
     </div>
+    <button type="button" id="btnPickSubtitle" class="sidecar-action">选择字幕文件</button>
+    <div id="subtitleStatus" class="block-foot" role="status"></div>
     <div id="subtitleList"></div>
-    <div class="block-foot">外挂字幕扫描同目录同名/变体文件 · 内嵌文本字幕需后台抽取为 SRT · PGS 位图字幕由本地解码后直接叠加显示</div>
+    <div class="subtitle-options">
+      <label>字幕时间 <input type="number" id="subtitleDelay" min="-10" max="10" step="0.1" value="0" /> 秒</label>
+      <button type="button" id="subtitleDelayReset">时间归零</button>
+      <div class="block-foot">负数提前，正数延后；仅对当前影片生效。</div>
+      <label>字号 <select id="subtitleFontSize"><option value="18">小</option><option value="24">标准</option><option value="30">大</option><option value="36">特大</option></select></label>
+      <label>颜色 <select id="subtitleColor"><option value="#ffffff">白色</option><option value="#ffff00">黄色</option><option value="#00ffff">青色</option></select></label>
+      <label>描边 <select id="subtitleOutline"><option value="0">无</option><option value="2">标准</option><option value="4">加粗</option></select></label>
+      <label>位置 <select id="subtitlePosition"><option value="inside">画面内底部（1）</option><option value="below">画面下方（2）</option></select></label>
+      <label>自动字幕语言 <select id="subtitleLanguage"><option value="auto">跟随文件默认</option><option value="zh-Hans">简体中文</option><option value="zh-Hant">繁体中文</option><option value="en">英语</option><option value="ja">日语</option><option value="ko">韩语</option></select></label>
+      <button type="button" id="subtitleSave">保存样式与语言</button>
+    </div>
+    <div class="block-foot">样式即时预览，点击保存后供下次使用。ASS/SSA 支持文字与时间，不保留原特效；内嵌字幕、PGS 尚未实现。</div>
+  </div>
+
+  <div class="block-panel" id="danmakuPanel" hidden>
+    <div class="block-head"><b>载入弹幕</b><span class="spacer"></span><button type="button" id="danmakuClose" title="关闭">✕</button></div>
+    <button type="button" id="btnPickDanmaku" class="sidecar-action">选择弹幕文件</button>
+    <div id="danmakuStatus" class="block-foot" role="status">支持 B 站 XML 与数组格式 JSON，可选择不同目录、不同文件名的弹幕。</div>
+    <button type="button" id="btnClearDanmaku" class="sidecar-action">清除本片弹幕</button>
   </div>
 
   <aside class="playlist" id="playlist" aria-label="剧集播放列表">
@@ -405,6 +433,8 @@
 <script src="android-file-order.js"></script>
 <script src="android-thumbnails.js"></script>
 <script src="android-storage.js"></script>
+<script src="android-sidecars.js"></script>
+<script src="android-subtitle-view.js"></script>
 <script src="android-resume-store.js"></script>
 <script src="android-player-tools.js"></script>
 <script src="android-gestures.js"></script>
@@ -1179,14 +1209,21 @@
       } catch (error) { toast('读取文件夹失败：' + (error.message || String(error)), 7000); }
     }
 
-    function desktopLoadDanmaku(name, text) {
-      chipDanmaku.textContent = '💬 解析中…';
+    function desktopLoadDanmaku(name, text, owner) {
+      owner = owner || { video: videoLoadToken, path: currentVideoPath, selection: danmakuSelectionGeneration };
       var token = ++danmakuLoadToken;
-      var t0 = performance.now();
-      setTimeout(function () {
-        if (token !== danmakuLoadToken) return;
-        applyDanmakuText(name, text, t0);
-      }, 30);
+      var started = performance.now();
+      return new Promise(function (resolve, reject) {
+        setTimeout(function () {
+          if (token !== danmakuLoadToken || !ownsSidecar(owner, 'danmaku')) { resolve(false); return; }
+          try {
+            applyDanmakuText(name, text, started);
+            activeDanmakuName = name;
+            $('danmakuStatus').textContent = '已载入：' + name + ' · ' + danmakuList.length.toLocaleString() + ' 条';
+            resolve(true);
+          } catch (error) { reject(error); }
+        }, 30);
+      });
     }
 
     // ---- 音轨编码探测 + 外挂音轨（audio-track 插件） ----
@@ -1206,7 +1243,168 @@
     var mountedSubId = '';      // 当前挂载的字幕条目 id；'' = 关闭
     var droppedSubs = [];       // 拖进窗口的字幕文件（不在视频同目录也能用；换片清空）
     var pendingSub = null;      // 正在后台抽取的内嵌字幕条目
+    var subtitleView = null;
+    var subtitleSelectionGeneration = 0;
+    var subtitleManual = false;
+    var subtitleDelay = 0;
+    var subtitlePreferences = window.AndroidSidecars.preferences({});
+    var danmakuSelectionGeneration = 0;
+    var danmakuManual = false;
+    var activeDanmakuName = '';
+    try { subtitlePreferences = window.AndroidSidecars.preferences(JSON.parse(localStorage.getItem('bplayer.android.subtitles') || '{}')); } catch (error) {}
     var pillLabel = '音轨';     // 当前后台任务的类型标签
+
+    function canSelectSidecar() {
+      return !!(currentVideoPath && window.AndroidPlayback.active && !window.AndroidPlayback.loading && !window.AndroidPlayerTools.locked && !window.AndroidPlayerTools.resumePending);
+    }
+
+    function ownsSidecar(owner, kind) {
+      return owner.video === videoLoadToken && owner.path === currentVideoPath && window.AndroidPlayback.active &&
+        owner.selection === (kind === 'subtitle' ? subtitleSelectionGeneration : danmakuSelectionGeneration);
+    }
+
+    function beginSidecar(kind, manual) {
+      if (kind === 'subtitle') {
+        subtitleSelectionGeneration++;
+        if (manual) subtitleManual = true;
+        if (subtitleView) subtitleView.cancelPending();
+      } else {
+        danmakuSelectionGeneration++; danmakuLoadToken++;
+        if (manual) danmakuManual = true;
+      }
+      return { video: videoLoadToken, path: currentVideoPath, selection: kind === 'subtitle' ? subtitleSelectionGeneration : danmakuSelectionGeneration };
+    }
+
+    async function readSidecar(path, kind) {
+      var allowed = kind === 'subtitle' ? /\.(srt|ass|ssa|vtt)$/i : /\.(xml|json)$/i;
+      if (!allowed.test(path)) throw new Error('文件类型不支持');
+      var stat = await invoke('fs_stat', { path: path });
+      if (stat.kind !== 'file') throw new Error('文件不存在或不是普通文件');
+      if (stat.size > 32 * 1024 * 1024) throw new Error('附件超过 32 MiB 限制');
+      var encoded = await invoke('read_bytes', { path: path });
+      if (encoded.length > 44739244) throw new Error('附件超过 32 MiB 限制');
+      var binary = atob(encoded);
+      var bytes = new Uint8Array(binary.length);
+      for (var index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index);
+      return window.AndroidSidecars.decode(bytes);
+    }
+
+    function ensureSubtitleView() {
+      if (!art) return null;
+      if (!subtitleView) {
+        subtitleView = window.AndroidSubtitleView.create(art);
+        art.on('destroy', function () { if (subtitleView) subtitleView.dispose(); subtitleView = null; });
+        art.on('control', applySubtitleStyle);
+      }
+      return subtitleView;
+    }
+
+    function applySubtitleStyle() {
+      if (!art) return;
+      var outline = subtitlePreferences.outline;
+      var shadow = outline ? [-1, 0, 1].flatMap(function (horizontal) {
+        return [-1, 0, 1].filter(function (vertical) { return horizontal || vertical; }).map(function (vertical) {
+          return horizontal * outline + 'px ' + vertical * outline + 'px 1px #000';
+        });
+      }).join(',') : 'none';
+      art.subtitle.style({ fontSize: subtitlePreferences.fontSize + 'px', color: subtitlePreferences.color,
+        textShadow: shadow, whiteSpace: 'pre-line', overflowWrap: 'anywhere', lineHeight: '1.4',
+        maxHeight: '48vh', overflow: 'hidden', padding: '0 12px', boxSizing: 'border-box' });
+      if (subtitleView) { subtitleView.setOffset(subtitleDelay); subtitleView.setPosition(subtitlePreferences.position); }
+    }
+
+    function bindSubtitleOptions() {
+      $('subtitleFontSize').value = String(subtitlePreferences.fontSize);
+      $('subtitleColor').value = subtitlePreferences.color;
+      $('subtitleOutline').value = String(subtitlePreferences.outline);
+      $('subtitlePosition').value = subtitlePreferences.position;
+      $('subtitleLanguage').value = subtitlePreferences.language;
+      function preview() {
+        subtitlePreferences = window.AndroidSidecars.preferences({ fontSize: Number($('subtitleFontSize').value),
+          color: $('subtitleColor').value, outline: Number($('subtitleOutline').value), position: $('subtitlePosition').value, language: $('subtitleLanguage').value });
+        applySubtitleStyle();
+      }
+      ['subtitleFontSize', 'subtitleColor', 'subtitleOutline', 'subtitlePosition', 'subtitleLanguage'].forEach(function (id) { $(id).addEventListener('change', preview); });
+      $('subtitleDelay').addEventListener('input', function () {
+        subtitleDelay = Math.round(Math.max(-10, Math.min(10, Number(this.value) || 0)) * 10) / 10;
+        applySubtitleStyle();
+      });
+      $('subtitleDelay').addEventListener('change', function () { this.value = String(subtitleDelay); });
+      $('subtitleDelayReset').addEventListener('click', function () { subtitleDelay = 0; $('subtitleDelay').value = '0'; applySubtitleStyle(); });
+      $('subtitleSave').addEventListener('click', function () {
+        preview();
+        try { localStorage.setItem('bplayer.android.subtitles', JSON.stringify(subtitlePreferences)); $('subtitleStatus').textContent = '样式与语言偏好已保存；时间偏移仅用于当前影片。'; }
+        catch (error) { $('subtitleStatus').textContent = '保存失败，请检查应用存储空间。'; }
+      });
+    }
+
+    async function loadSubtitlePath(path, silent, owner) {
+      owner = owner || beginSidecar('subtitle', !silent);
+      if (!ownsSidecar(owner, 'subtitle')) return false;
+      $('subtitleStatus').textContent = '正在读取字幕…';
+      try {
+        var text = await readSidecar(path, 'subtitle');
+        if (!ownsSidecar(owner, 'subtitle')) return false;
+        var type = pathName(path).split('.').pop().toLowerCase();
+        var vtt = window.AndroidSidecars.toVtt(text, type);
+        var view = ensureSubtitleView();
+        if (!view) return false;
+        await view.load(vtt, function () { return ownsSidecar(owner, 'subtitle'); });
+        if (!ownsSidecar(owner, 'subtitle')) return false;
+        var item = addDroppedSubtitle(path);
+        mountedSubId = item.id;
+        applySubtitleStyle(); refreshSubtitleMenu();
+        $('subtitleStatus').textContent = '已载入：' + item.name + (type === 'ass' || type === 'ssa' ? '（文字兼容，不含原特效）' : '');
+        return true;
+      } catch (error) {
+        if (ownsSidecar(owner, 'subtitle') && error.name !== 'AbortError') {
+          $('subtitleStatus').textContent = '字幕加载失败：' + (error.message || String(error));
+          if (!silent) toast('字幕加载失败，原字幕保持不变', 5000);
+        }
+        return false;
+      }
+    }
+
+    async function loadDanmakuPath(path, owner) {
+      owner = owner || beginSidecar('danmaku', true);
+      if (!ownsSidecar(owner, 'danmaku')) return false;
+      $('danmakuStatus').textContent = '正在读取弹幕…';
+      try {
+        var text = await readSidecar(path, 'danmaku');
+        if (!ownsSidecar(owner, 'danmaku')) return false;
+        if (/\.xml$/i.test(path)) {
+          var xml = new DOMParser().parseFromString(text, 'text/xml');
+          if (xml.getElementsByTagName('parsererror').length || !xml.documentElement || xml.documentElement.tagName !== 'i') throw new Error('不是有效的 B 站 XML 弹幕');
+        }
+        var loaded = await desktopLoadDanmaku(pathName(path), text, owner);
+        if (loaded && ownsSidecar(owner, 'danmaku')) {
+          activeDanmakuName = pathName(path);
+          $('danmakuStatus').textContent = '已载入：' + activeDanmakuName + ' · ' + danmakuList.length.toLocaleString() + ' 条';
+        }
+        return loaded;
+      } catch (error) {
+        if (ownsSidecar(owner, 'danmaku')) { $('danmakuStatus').textContent = '弹幕加载失败：' + (error.message || String(error)); toast('弹幕加载失败，原弹幕保持不变', 5000); }
+        return false;
+      }
+    }
+
+    async function chooseSidecar(kind) {
+      if (!canSelectSidecar()) return;
+      var video = videoLoadToken;
+      var videoPath = currentVideoPath;
+      var path = await window.AndroidFiles.open(kind, null, pathDir(videoPath));
+      if (path) window.AndroidFiles.takeSelection(path);
+      if (!path || video !== videoLoadToken || videoPath !== currentVideoPath || !canSelectSidecar()) return;
+      var owner = beginSidecar(kind, true);
+      if (kind === 'subtitle') await loadSubtitlePath(path, false, owner); else await loadDanmakuPath(path, owner);
+    }
+
+    function resetSidecars() {
+      subtitleSelectionGeneration++; danmakuSelectionGeneration++; danmakuLoadToken++;
+      subtitleManual = false; danmakuManual = false; subtitleDelay = 0; mountedSubId = ''; activeDanmakuName = '';
+      if (subtitleView) { subtitleView.clear(); subtitleView.setOffset(0); }
+      $('subtitleDelay').value = '0'; $('subtitleStatus').textContent = ''; $('danmakuStatus').textContent = '支持 B 站 XML 与数组格式 JSON，可选择不同目录、不同文件名的弹幕。';
+    }
 
     function codecName(c) {
       if (c.indexOf('A_DTS') === 0) return 'DTS（含 DTS-HD）';
@@ -1527,22 +1725,20 @@
           });
         });
         refreshSubtitleMenu();
-        if (!mountedSubId) autoMountSubtitle();
+        if (!mountedSubId && !subtitleManual) autoMountSubtitle();
       }).catch(function () { });
     }
 
     function refreshSubtitleMenu() {
       var btn = $('btnSubtitleEntry');
       var panel = $('subtitlePanel');
-      if (!subItems.length) {
-        btn.hidden = true;
-        closePanel('subtitlePanel');
-        return;
-      }
-      btn.hidden = false;
+      btn.hidden = !currentVideoPath || !window.AndroidPlayback.active;
       $('subtitleCount').textContent = subItems.length + ' 项';
       var list = $('subtitleList');
       list.innerHTML = '';
+      if (!subItems.length) {
+        var empty = document.createElement('div'); empty.className = 'block-foot'; empty.textContent = '尚无字幕，可选择任意目录中的字幕文件。'; list.appendChild(empty);
+      }
       var off = document.createElement('div');
       off.className = 'track-item' + (mountedSubId === '' ? ' current' : '');
       off.textContent = '关闭字幕';
@@ -1550,9 +1746,9 @@
       list.appendChild(off);
       subItems.forEach(function (s) {
         var item = document.createElement('div');
-        if (s.disabled) {
+        if (s.disabled || s.kind !== 'ext') {
           item.className = 'track-item disabled';
-          item.textContent = s.name;
+          item.textContent = s.name + (s.kind !== 'ext' ? '（内嵌字幕尚未实现）' : '');
           list.appendChild(item);
           return;
         }
@@ -1579,10 +1775,7 @@
       closePanel('subtitlePanel');
       if (s.kind === 'bitmap') { mountPgsSubtitle(s, silent); return; }
       unmountPgs(); // 从位图字幕切到文本字幕：收起图像层
-      if (s.kind === 'ext') {
-        mountSubtitleUrl(mediaUrl(s.path), s, silent);
-        return;
-      }
+      if (s.kind === 'ext') return loadSubtitlePath(s.path, silent);
       // 内嵌：整条链走内存，不产生缓存文件
       pendingSub = s;
       pillLabel = '字幕';
@@ -1617,46 +1810,17 @@
       });
     }
 
-    // 内存里的字幕文本直接交给播放器，用完释放上一个 blob
-    var lastSubBlobUrl = '';
-    function mountSubtitleText(text, s, silent) {
-      if (!art) return;
-      if (lastSubBlobUrl) { try { URL.revokeObjectURL(lastSubBlobUrl); } catch (e) { } lastSubBlobUrl = ''; }
-      var url;
+    function mountSubtitleText(text, item, silent) {
+      var owner = beginSidecar('subtitle', !silent);
+      var view = ensureSubtitleView();
+      if (!view) return Promise.resolve(false);
       try {
-        url = URL.createObjectURL(new Blob([text], { type: 'text/plain;charset=utf-8' }));
-        lastSubBlobUrl = url;
-      } catch (e) {
-        toast('字幕加载失败：' + e, 6000);
-        return;
-      }
-      art.subtitle.switch(url, { name: s.name, type: 'srt', encoding: 'utf-8' }).then(function () {
-        mountedSubId = s.id;
-        art.subtitle.style({ display: 'block' });
-        refreshSubtitleMenu();
-        if (!silent) toast('已挂载字幕：' + s.name);
-      }).catch(function (e) {
-        toast('字幕加载失败：' + e, 6000);
-      });
-    }
-
-    function mountSubtitleUrl(url, s, silent) {
-      if (!art) return;
-      var opt = { name: s.name, type: s.type };
-      var encPromise = s.encoding
-        ? Promise.resolve(s.encoding)
-        : (s.kind === 'ext' ? detectEncoding(s.path) : Promise.resolve('utf-8'));
-      encPromise.then(function (enc) {
-        if (enc) { s.encoding = enc; opt.encoding = enc; }
-        return art.subtitle.switch(url, opt);
-      }).then(function () {
-        mountedSubId = s.id;
-        art.subtitle.style({ display: 'block' });
-        refreshSubtitleMenu();
-        if (!silent) toast('已挂载字幕：' + s.name);
-      }).catch(function (e) {
-        toast('字幕加载失败：' + e, 6000);
-      });
+        var vtt = window.AndroidSidecars.toVtt(text, item.type || 'srt');
+        return view.load(vtt, function () { return ownsSidecar(owner, 'subtitle'); }).then(function () {
+          if (!ownsSidecar(owner, 'subtitle')) return false;
+          mountedSubId = item.id; applySubtitleStyle(); refreshSubtitleMenu(); return true;
+        }).catch(function (error) { if (ownsSidecar(owner, 'subtitle') && error.name !== 'AbortError') toast('字幕加载失败', 5000); return false; });
+      } catch (error) { return Promise.resolve(false); }
     }
 
     // 拖入的字幕文件：登记进菜单（同一路径只登记一次），返回菜单条目供立即挂载
@@ -1848,7 +2012,10 @@
     }
 
     function unmountSubtitle() {
+      beginSidecar('subtitle', true);
+      if (subtitleView) subtitleView.clear();
       mountedSubId = '';
+      $('subtitleStatus').textContent = '字幕已关闭';
       closePanel('subtitlePanel');
       unmountPgs();
       if (art) art.subtitle.style({ display: 'none' });
@@ -1857,20 +2024,9 @@
 
     // 自动挂载：同名/变体外挂 > 默认内嵌文本轨 > 第一条内嵌文本轨 > 第一条外挂
     function autoMountSubtitle() {
-      var vb = baseName(currentVideoName).toLowerCase();
-      var exact = subItems.filter(function (s) {
-        if (s.kind !== 'ext') return false;
-        var b = baseName(s.name).toLowerCase();
-        return b === vb || b.indexOf(vb + '.') === 0;
-      });
-      var embDefault = subItems.filter(function (s) { return s.kind === 'embedded' && s.default; });
-      var embFirst = subItems.filter(function (s) { return s.kind === 'embedded'; });
-      var extFirst = subItems.filter(function (s) { return s.kind === 'ext'; });
-      var cand = exact[0];
-      // 内嵌文本轨要抽 SRT（读整遍文件），只在你开启了自动转换时才自动挂
-      if (!cand && appSettings.autoSubtitle) cand = embDefault[0] || embFirst[0];
-      if (!cand) cand = extFirst[0];
-      if (cand) mountSubtitle(cand, !!exact[0]);
+      if (subtitleManual) return;
+      var candidate = window.AndroidSidecars.pickSubtitle(subItems.filter(function (item) { return item.kind === 'ext'; }), currentVideoName, subtitlePreferences.language);
+      if (candidate) loadSubtitlePath(candidate.path, true);
     }
 
     function pillText(percent, written) {
@@ -1893,6 +2049,7 @@
     var videoLoadToken = 0;
     async function desktopLoadVideo(path, manualDanPath, epIndex, origin) {
       origin = origin || selectionOrigin(path);
+      resetSidecars();
       folderEntry = false;
       var token = ++videoLoadToken;
       var playlistTicket = ++playlistGeneration;
@@ -1913,6 +2070,7 @@
       if (st.kind !== 'file') throw new Error('文件不存在：' + name);
       currentVideoPath = normPath(path);
       currentVideoStat = { size: st.size, modified_ms: st.modified_ms };
+      refreshSubtitleMenu();
       clearDanmaku();
       probeTracks = null;
       probeDurationUs = null;
@@ -1940,13 +2098,14 @@
       handleAudioCodecs(path, name);
       // 外挂字幕扫描对全部视频类型生效（内嵌轨只有 MKV 能探测，由 handleAudioCodecs 补齐）
       if (!/\.(mkv|mka|webm)$/i.test(name)) buildSubtitleMenu(path, null, ++probeToken);
-      loadVideoSidecars(path, manualDanPath, epIndex, token, playlistTicket).catch(function (error) {
-        if (token !== videoLoadToken) return;
+      var autoDanOwner = { video: token, path: currentVideoPath, selection: danmakuSelectionGeneration };
+      loadVideoSidecars(path, manualDanPath, epIndex, token, playlistTicket, autoDanOwner).catch(function (error) {
+        if (token !== videoLoadToken || !ownsSidecar(autoDanOwner, 'danmaku')) return;
         chipDanmaku.textContent = '💬 附件读取失败';
         if (!window.AndroidPlayback || !window.AndroidPlayback.loading) toast('视频已打开，附件读取失败：' + (error.message || String(error)), 6000);
       });
     }
-    async function loadVideoSidecars(path, manualDanPath, epIndex, token, playlistTicket) {
+    async function loadVideoSidecars(path, manualDanPath, epIndex, token, playlistTicket, danOwner) {
       var name = pathName(path);
       var dir = pathDir(path);
       if (playlistTicket === playlistGeneration && epIndex == null) {
@@ -1967,16 +2126,18 @@
         renderPlaylist();
       }
       // 弹幕：手动拖入优先，否则零授权同名配对（直接打开 (AAC) 缓存时按原文件名配对）
+      if (!ownsSidecar(danOwner, 'danmaku') || (danmakuManual && !manualDanPath)) return;
       if (manualDanPath) {
-        var manualText = await invoke('read_text', { path: manualDanPath });
-        if (token !== videoLoadToken) return;
-        desktopLoadDanmaku(pathName(manualDanPath), manualText);
+        danmakuManual = true;
+        var manualText = await readSidecar(manualDanPath, 'danmaku');
+        if (!ownsSidecar(danOwner, 'danmaku')) return;
+        await desktopLoadDanmaku(pathName(manualDanPath), manualText, danOwner);
       } else {
         var pairPath = / \(AAC\)\.mkv$/i.test(name) ? path.replace(/ \(AAC\)\.mkv$/i, '.mkv') : path;
         var pair = await invoke('pair_danmaku', { videoPath: pairPath });
-        if (token !== videoLoadToken) return;
+        if (!ownsSidecar(danOwner, 'danmaku') || danmakuManual) return;
         if (pair) {
-          desktopLoadDanmaku(pair.name, pair.text);
+          await desktopLoadDanmaku(pair.name, String(pair.text).replace(/^\uFEFF/, ''), danOwner);
           if (!window.AndroidPlayback) toast('已自动加载同名弹幕：' + pair.name);
         } else {
           clearDanmaku();
@@ -1992,7 +2153,10 @@
           folderEntry = false; window.AndroidPlayback.restoreOrigin(folderOrigin);
         }
       },
-      cancelLoad: function () { videoLoadToken++; probeToken++; danmakuLoadToken++; },
+      cancelLoad: function () { videoLoadToken++; probeToken++; danmakuLoadToken++; resetSidecars(); },
+      loadSubtitle: function (path) { return canSelectSidecar() ? loadSubtitlePath(path, false) : Promise.resolve(false); },
+      loadDanmaku: function (path) { return canSelectSidecar() ? loadDanmakuPath(path) : Promise.resolve(false); },
+      get sidecars() { return { subtitle: mountedSubId, subtitleCount: subtitleView ? subtitleView.count : 0, delay: subtitleDelay, preferences: Object.assign({}, subtitlePreferences), danmaku: activeDanmakuName }; },
       get currentPath() { return currentVideoPath; },
       get currentStat() { return currentVideoStat ? Object.assign({}, currentVideoStat) : null; },
       // 拖入字幕的入口（拖放回调与外部调试共用）
@@ -2089,6 +2253,14 @@
       if (opening) closeOtherPanels('subtitlePanel'); else closePanel('subtitlePanel');
     });
     $('subtitleClose').addEventListener('click', function () { closePanel('subtitlePanel'); });
+    $('btnPickSubtitle').addEventListener('click', function () { chooseSidecar('subtitle'); });
+    $('btnPickDanmaku').addEventListener('click', function () { chooseSidecar('danmaku'); });
+    $('btnDanmakuEntry').addEventListener('click', function () { navigation.open('danmakuPanel'); });
+    $('danmakuClose').addEventListener('click', function () { closePanel('danmakuPanel'); });
+    $('btnClearDanmaku').addEventListener('click', function () {
+      if (!canSelectSidecar()) return;
+      beginSidecar('danmaku', true); clearDanmaku(); activeDanmakuName = ''; $('danmakuStatus').textContent = '本片弹幕已清除，源文件未修改。';
+    });
 
     // 播完自动下一集
     window.__BplayerNext = function () {
@@ -2177,6 +2349,7 @@
       toast((p.kind === 'subtitle' ? '字幕抽取失败：' : '音轨转换失败：') + (p.message || '未知错误'), 8000);
     });
 
+    bindSubtitleOptions();
     renderPlaylist();
   }
 

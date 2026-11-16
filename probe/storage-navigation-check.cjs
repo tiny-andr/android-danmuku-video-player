@@ -57,19 +57,24 @@ function environment() {
     getElementById(id) { return [...document.head.querySelectorAll('#' + id), ...document.body.querySelectorAll('#' + id)][0] || null; },
   };
   document.head = new Element('head', document); document.body = new Element('body', document);
-  const values = new Map(); const calls = []; let offline = false; let deferred = null; let invalidations = 0;
+  const values = new Map(); const calls = []; const thumbnails = []; const callerLayers = ['info', 'subtitlePanel'];
+  let offline = false; let deferred = null; let emptyDirectory = false; let invalidations = 0; let clears = 0;
   const sourceId = '11111111-1111-4111-8111-111111111111'; const root = '/@network/' + sourceId;
   const sources = Array.from({ length: 8 }, (_, index) => ({ id: index ? 'source-' + index : sourceId, name: 'NAS ' + index, host: 'nas-' + index, protocol: 'smb', share: 'Videos' }));
   function entries(dir) {
-    return [{ name: 'Season', path: dir + '/Season', is_dir: true }, ...Array.from({ length: 22 }, (_, index) => ({ name: 'Episode' + String(index).padStart(2, '0') + '.mp4', path: dir + '/Episode' + String(index).padStart(2, '0') + '.mp4', size: 100 + index, modified_ms: 1000 + index }))];
+    return [{ name: 'Season', path: dir + '/Season', is_dir: true },
+      ...Array.from({ length: 22 }, (_, index) => ({ name: 'Episode' + String(index).padStart(2, '0') + '.mp4', path: dir + '/Episode' + String(index).padStart(2, '0') + '.mp4', size: 100 + index, modified_ms: 1000 + index })),
+      ...Array.from({ length: 12 }, (_, index) => { const name = 'Subtitle' + String(index).padStart(2, '0') + '.' + ['srt', 'ASS', 'ssa', 'VTT'][index % 4]; return { name, path: dir + '/' + name, size: 20 + index, modified_ms: 2000 + index }; }),
+      ...Array.from({ length: 8 }, (_, index) => { const name = 'Comments' + String(index).padStart(2, '0') + '.' + ['xml', 'JSON'][index % 2]; return { name, path: dir + '/' + name, size: 30 + index, modified_ms: 3000 + index }; }),
+      ...['readme.txt', 'sound.mp3', 'picture.jpg', 'video.mp4.bak'].map(name => ({ name, path: dir + '/' + name, size: 1 }))];
   }
-  function listing(dir) { calls.push(dir); if (deferred) { const result = deferred; deferred = null; return result; } if (offline && dir.startsWith('/@network/')) return Promise.reject(new Error('Offline fixture')); return Promise.resolve({ dir, entries: entries(dir) }); }
+  function listing(dir) { calls.push(dir); if (deferred) { const result = deferred; deferred = null; return result; } if (offline && dir.startsWith('/@network/')) return Promise.reject(new Error('Offline fixture')); return Promise.resolve({ dir, entries: emptyDirectory ? [] : entries(dir) }); }
   const localStorage = { getItem: key => values.get(key) ?? null, setItem: (key, value) => values.set(key, String(value)), removeItem: key => values.delete(key) };
   const window = {
     __TAURI__: { core: { invoke: (command, args) => { if (command === 'list_dir') return listing(args.dir); throw new Error('Unexpected local command ' + command); }, convertFileSrc: value => value } },
     AndroidFileOrder: ordering,
-    AndroidNavigation: { invalidate() { invalidations++; } },
-    AndroidThumbnailsView: { observe() { return () => {}; } },
+    AndroidNavigation: { invalidate() { invalidations++; }, clear() { clears++; callerLayers.length = 0; } },
+    AndroidThumbnailsView: { observe(image, target) { thumbnails.push(target); return () => {}; } },
     AndroidNetwork: {
       request(id, command, raw) {
         const args = JSON.parse(raw);
@@ -79,7 +84,9 @@ function environment() {
     },
   };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../bplayer-android/ui/android-storage.js'), 'utf8'), { window, document, localStorage, Map, Promise, setTimeout, clearTimeout, console });
-  return { window, document, calls, root, sourceId, values, setOffline(value) { offline = value; }, defer(promise) { deferred = promise; }, get invalidations() { return invalidations; } };
+  return { window, document, calls, root, sourceId, values, thumbnails, callerLayers,
+    setOffline(value) { offline = value; }, setEmpty(value) { emptyDirectory = value; },
+    defer(promise) { deferred = promise; }, get invalidations() { return invalidations; }, get clears() { return clears; } };
 }
 const settle = async () => { for (let index = 0; index < 6; index++) await new Promise(resolve => setImmediate(resolve)); };
 const serialize = value => JSON.parse(JSON.stringify(value));
@@ -156,5 +163,71 @@ const serialize = value => JSON.parse(JSON.stringify(value));
   assert(files.takeSelection(selectedPath));
   picker = files.open('file', null, '/sdcard/Download'); await settle(); assert.equal(files.takeSelection(selectedPath), null); files.close(null); await picker;
   report.push('stale async responses and old selections cannot replace active route');
+
+  picker = files.open('file', null, '/sdcard/Attachments'); await settle();
+  assert.equal(rows().length, 23); assert(rows().filter(row => !row.querySelector('.aArrow')).every(row => /\.mp4$/i.test(row.dataset.path)));
+  if (!get('aFileList').classList.contains('is-grid')) get('aFileView').click();
+  get('aFileList').scrollTop = 490; const videoPosition = anchor();
+  const videoPath = rows().find(row => !row.querySelector('.aArrow')).dataset.path;
+  files.close(videoPath); await picker; const videoSnapshot = files.takeSelection(videoPath);
+  assert(videoSnapshot.grid); const gridPreference = JSON.parse(env.values.get('bplayer.android.fileView')).grid;
+  assert(gridPreference); const thumbnailCount = env.thumbnails.length;
+  const savedLayers = env.callerLayers.slice();
+  const attachmentSnapshots = {};
+  for (const [attachmentMode, title, extensions, icon, count, scrollTop] of [
+    ['subtitle', '选择字幕', /\.(srt|ass|ssa|vtt)$/i, '字', 13, 200],
+    ['danmaku', '选择弹幕', /\.(xml|json)$/i, '弹', 9, 360],
+  ]) {
+    picker = files.open(attachmentMode, null, '/sdcard/Attachments'); await settle();
+    assert.equal(get('aPickerTitle').textContent, title);
+    assert.equal(rows().length, count); assert.equal(get('aFileView').hidden, true); assert.equal(get('aFileTools').hidden, false);
+    assert.equal(get('aFileList').classList.contains('is-grid'), false); assert.equal(get('aFileBar').hidden, true);
+    assert.equal(get('aFileList').scrollTop, 0, 'Attachment mode cannot reuse video or other attachment scroll');
+    assert(rows().filter(row => !row.querySelector('.aArrow')).every(row => extensions.test(row.dataset.path) && !row.disabled && row.querySelector('.aFileIcon').textContent === icon));
+    assert.equal(get('aFileList').querySelectorAll('img').length, 0); assert.equal(env.thumbnails.length, thumbnailCount);
+    get('aFileView').click(); assert.equal(get('aFileList').classList.contains('is-grid'), false); assert.equal(env.thumbnails.length, thumbnailCount);
+    rows().find(row => row.querySelector('.aArrow')).click(); await settle();
+    assert.equal(get('aFilePath').textContent, '手机存储/Attachments/Season');
+    files.back(); await settle(); assert.equal(get('aFilePath').textContent, '手机存储/Attachments');
+    get('aFileList').scrollTop = scrollTop; const position = anchor();
+    get('aFileDirection').click(); assertPosition(position);
+    const target = rows().find(row => !row.querySelector('.aArrow')).dataset.path;
+    rows().find(row => row.dataset.path === target).click(); assert.equal(await picker, target);
+    const savedAttachment = files.takeSelection(target);
+    assert.equal(savedAttachment.version, 1); assert.equal(savedAttachment.mode, attachmentMode); assert.equal(savedAttachment.grid, false);
+    assert(Object.isFrozen(savedAttachment)); assert.equal(files.takeSelection(target), null);
+    attachmentSnapshots[attachmentMode] = savedAttachment;
+    assert.equal(JSON.parse(env.values.get('bplayer.android.fileView')).grid, gridPreference);
+    assert.deepEqual(env.callerLayers, savedLayers); assert.equal(env.clears, 0);
+  }
+  report.push('all four modes filter supported files; attachments use list icons with zero thumbnail requests');
+
+  for (const attachmentMode of ['subtitle', 'danmaku']) {
+    const savedAttachment = attachmentSnapshots[attachmentMode];
+    picker = files.restore(savedAttachment); await settle();
+    assert.equal(get('aPickerTitle').textContent, attachmentMode === 'subtitle' ? '选择字幕' : '选择弹幕');
+    assertPosition(savedAttachment.position); assert.equal(get('aFileList').classList.contains('is-grid'), false);
+    assert.equal(get('aFileView').hidden, true); assert.equal(env.thumbnails.length, thumbnailCount);
+    files.close(null); assert.equal(await picker, null); assert.equal(files.takeSelection(savedAttachment.selectedPath), null);
+    assert.deepEqual(env.callerLayers, savedLayers);
+  }
+  picker = files.open('file', null, '/sdcard/Attachments'); await settle(); assertPosition(videoPosition); assert(get('aFileList').classList.contains('is-grid')); assert.equal(get('aFileView').hidden, false);
+  files.close(null); await picker;
+  picker = files.restore(videoSnapshot); await settle(); assertPosition(videoSnapshot.position); assert(get('aFileList').classList.contains('is-grid')); files.close(null); await picker;
+  report.push('mode-prefixed anchors and version-1 snapshots preserve independent video/subtitle/danmaku positions');
+
+  env.setEmpty(true);
+  for (const attachmentMode of ['subtitle', 'danmaku']) {
+    picker = files.open(attachmentMode, null, '/sdcard/Empty'); await settle();
+    assert.match(get('aFileList').textContent, attachmentMode === 'subtitle' ? /字幕.*SRT/ : /弹幕.*XML/);
+    assert.equal(get('aFileView').hidden, true); assert.equal(get('aFileTools').hidden, false);
+    files.close(null); assert.equal(await picker, null);
+  }
+  env.setEmpty(false);
+  picker = files.open('subtitle', null, env.root + '/Attachments'); await settle();
+  assert.equal(rows().length, 13); const remoteSubtitle = rows().find(row => !row.querySelector('.aArrow')).dataset.path;
+  rows().find(row => row.dataset.path === remoteSubtitle).click(); assert.equal(await picker, remoteSubtitle); assert.equal(files.takeSelection(remoteSubtitle).section, 'network');
+  assert.deepEqual(env.callerLayers, savedLayers); assert.equal(env.clears, 0);
+  report.push('attachment empty states, network filtering and cancellation leave caller overlay stack intact');
   console.log(JSON.stringify({ passed: true, groups: report.length, report }, null, 2));
 })().catch(error => { console.error(error); process.exitCode = 1; });

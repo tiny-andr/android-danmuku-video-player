@@ -16,6 +16,8 @@ bplayer-android/
     android-shell.js      手机壳：启动页、播放页顶栏、信息卡、方向/沉浸式桥
     android-storage.js    文件浏览器、网络连接表单、存储命令路由
     android-navigation.js Overlay stack, task invalidation and scroll anchors
+    android-sidecars.js   Bounded text decoding, subtitle normalization and language preferences
+    android-subtitle-view.js Atomic text-track loading, safe rendering and per-video timing
     android-file-order.js 自然文件名、修改时间和类型排序
     android-thumbnails.js 可见项封面调度、取消与最近播放缓存读取
     android-gestures.js   播放区域亮度/媒体音量、双击跳转与触摸锁仲裁
@@ -43,6 +45,9 @@ research/
 - **原生桥**：`MainActivity.kt` 通过 `AndroidUI` 提供沉浸式、按视频尺寸选择方向、播放常亮、窗口亮度、媒体音量与退出能力。亮度只改当前窗口，退出播放恢复系统亮度；音量使用 Android 媒体音量，不用网页音量伪装。
   Native and top Back share `window.__aAndroidBack()`: touch-lock/resume decision, file-browser hierarchy, loading/pending-task cancellation, top overlay, playback origin, then app exit. Playback must restore its launch origin, not hard-code home or derive a directory from the media path.
 - **Navigation**: `android-navigation.js` owns registered layers; use open/close/clear rather than independent DOM toggles. Information-card children restore their caller; direct controls return to playback. `AndroidFiles.takeSelection(path)` transfers a one-shot immutable browser snapshot; `restore(snapshot)` returns a picker promise. Episode changes retain the session origin; explicit folder lists retain their browser caller. See `research/navigation-return-rules.md`.
+- **Sidecar selection**: Subtitle and danmaku pickers do not change the playback origin. Claim selection ownership only after a non-empty picker result; cancellation must preserve automatic loading. Valid manual choices invalidate older automatic results. Local and network text reads are bounded to 32 MiB. Stage a new subtitle track before replacing the current one, render cue text with textContent, and revoke tracks/Blob URLs on replacement or exit. ASS/SSA are text/time compatible only, not full styled libass rendering. Delay resets per video; style/language persist only through the explicit Save button.
+- **Scope decisions**: PiP and hold-to-speed were declined. The subtitle batch adds no native media dependencies. After its commit, the user approved starting the Windows Bplayer audio-conversion port: convert only the selected unsupported audio track, keep the video unchanged and store the completed audio cache beside the video, including writable network sources. Background services remain deferred.
+- **Subtitle layout**: Default to small (18 CSS px), no outline and the visible video picture's inside bottom, not the player window bottom. A below-picture option falls back inside when letterbox space is insufficient. Recompute from real video dimensions and contain/cover bounds on resize, fold, metadata, fit and control changes; persist position only through Save.
 - **网络存储**：`AndroidNetwork` 提供异步请求和流式媒体 URL；连接凭据使用 Android Keystore 加密，网页只接收公开字段。SMB 仅启用 2.1/3.x，WebDAV 仅 HTTPS，SFTP 必须核对主机指纹；禁止跳过证书或指纹校验。详细结构见 `research/network-storage.md`。
 - **方向策略**：Manifest 为 `user`。首页遵守系统旋转设置，禁止使用 `fullSensor` 绕过旋转锁。关闭系统自动旋转时播放保持当前方向；开启时，视频宽 > 高使用横屏，宽 ≤ 高使用竖屏。顶部“横屏／竖屏”是用户主动覆盖方向的入口，随控件显隐，不修改系统开关；退出或换片清除覆盖。等待真实视频尺寸后才选默认方向，退出播放恢复系统策略。
 - **播放控制栏**：弹幕插件通过 `mount()` 固定到 `.mDanControls`，不要让窄屏自动把工具栏移到画面底边。顶部不再重复放弹幕开关；横竖屏的底部开关和设置均保留，控制区使用高不透明黑色背景。
@@ -53,7 +58,7 @@ research/
 - **共享浏览**：新 SMB 来源共享名留空时使用 `scope=server`，路径为 `/@network/id/share/relative`；历史缺少 scope 的来源仍是绑定共享的 `scope=share`，禁止原 id 改 scope 重新解释续播路径。枚举可见不等于有目录读取权限，禁止降级 SMB1 或泄露密码。
 - **播放常亮**：设置默认勾选，旧设置缺字段默认开启；原生窗口和 WebView 子视图常亮都受前台播放会话与用户选项约束，离开播放或后台释放，不修改系统熄屏时间。
 - **安全区**：所有固定层用 `env(safe-area-inset-*)`，刘海/状态栏出现或沉浸式切换时自适应。
-- **移动端信息入口**：桌面底部信息条在手机上收进播放页顶栏的 `i` 信息卡（数据仍读 `#infoDuration` 等节点），卡内同时提供音轨、字幕、弹幕屏蔽、设置入口。音轨/字幕按钮沿用原逻辑的可用性：没有可选轨道时置灰。
+- **Mobile information actions**: The playback information card reuses desktop info nodes and provides audio, subtitle, manual danmaku, filtering and settings actions. Audio availability follows selectable tracks. Subtitle selection remains available during a valid playback session even when no automatic subtitle matched.
 
 ## 构建与安装
 
