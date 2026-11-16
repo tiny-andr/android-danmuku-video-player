@@ -26,3 +26,7 @@ probe/local.properties
 tmp/
 .gradle-network-home/
 .android-network/
+
+# 本地交接笔记与一次性临时文件
+old-HANDOFF.md
+.tmp-*
