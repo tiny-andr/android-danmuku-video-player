@@ -268,7 +268,13 @@ internal class UpdateChecker(
     val apks = (0 until assets.length()).mapNotNull { assets.optJSONObject(it) }
       .filter { it.optString("name").endsWith(".apk", ignoreCase = true) }
       .filter { !it.optString("name").contains("unsigned", ignoreCase = true) }
-    val asset = apks.firstOrNull { !it.optString("name").contains("debug", ignoreCase = true) } ?: apks.firstOrNull()
+    // Debug and release builds ship side by side with independent signatures, so each one
+    // must upgrade along its own track: a debug install that grabs the release APK cannot
+    // install it at all. Match the asset name against this build type first.
+    val wantsDebug = BuildConfig.DEBUG
+    val asset = apks.firstOrNull {
+      it.optString("name").contains("debug", ignoreCase = true) == wantsDebug
+    } ?: apks.firstOrNull()
       ?: throw UpdateFailure("该版本没有 APK 安装包")
     val assetName = sanitizeName(asset.optString("name"))
     if (assetName.isEmpty()) throw UpdateFailure("Release 的 APK 文件名不可用")

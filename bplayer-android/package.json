@@ -1,12 +1,13 @@
 {
   "name": "bplayer-android",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "private": true,
   "description": "Bplayer Android 移植（Tauri 2）",
   "//scripts": "npm run check = 纯 Node 回归检查（不需要设备、不需要 CDP，可在任何机器上跑）。npm run check:device = 真机 CDP/ADB 回归，前置条件：1) 手机已 adb 连接（可选 ANDROID_SERIAL）；2) 应用已启动并通过 `adb forward tcp:9223 localabstract:webview_devtools_remote_<pid>` 把 WebView devtools 端口映射出来（默认 CDP_PORT=9223，可覆盖）；3) 这些脚本会修改系统设置、方向和播放状态，不要放进 check。",
   "scripts": {
     "tauri": "tauri",
     "android:build": "tauri android build --debug --apk -t aarch64",
+    "android:build:release": "tauri android build --apk -t aarch64",
     "check": "npm run check:audio && npm run check:subtitle && npm run check:sidecar && npm run check:navigation && npm run check:file-order && npm run check:resume && npm run check:thumbnail && npm run check:screen-on && npm run check:storage && npm run check:recent",
     "check:audio": "node ../probe/audio-frontend-check.cjs",
     "check:subtitle": "node ../probe/subtitle-view-check.cjs",
