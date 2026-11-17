@@ -203,7 +203,31 @@
       "#aFileList.is-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(145px,1fr));grid-auto-rows:max-content;gap:10px;align-content:start;}#aFileList.is-grid .aRow{position:relative;display:block;height:auto;min-width:0;align-self:start;overflow:hidden;padding:9px;background:#ffffff06;}#aFileList.is-grid .aFileDetail{margin-top:8px;}#aFileList.is-grid .aFileThumb{display:block;opacity:0;}#aFileList.is-grid .aFileThumb.thumbnail-ready{opacity:1;}#aFileList.is-grid .aFileIcon{width:100%;aspect-ratio:16/9;height:auto;font-size:30px;}#aFileList.is-grid .aFileThumb+.aFileIcon{position:absolute;left:9px;top:9px;width:calc(100% - 18px);}#aFileList.is-grid .aFileThumb.thumbnail-ready+.aFileIcon{display:none;}#aFileList.is-grid .aArrow{display:none;}#aFileList.is-grid .aName{width:100%;}#aFileList.is-grid .aStatus{grid-column:1/-1;}" +
       "@media(min-width:720px) and (min-height:540px){#aFileBox{max-width:1180px}.aFileLayout{flex-direction:row;}.aFileSidebar{flex:0 0 160px;border-right:1px solid #ffffff10;padding-top:12px;}#aFileMask .aTabs{flex-direction:column;margin:0 10px 14px;}#aFileMask #aQuick{flex-direction:column;overflow:auto;padding:0 10px;}#aFileMask .aTabs button{flex:none;text-align:left;}#aFileMask #aQuick button{text-align:left;}.aField.wide{grid-column:auto;}.aField:first-child{grid-column:1/-1;}}" +
       "@media(min-width:900px){#aFileMask{padding-top:calc(10px + env(safe-area-inset-top,0px));padding-bottom:calc(10px + env(safe-area-inset-bottom,0px))}#aFileBox{border:1px solid #ffffff15;border-radius:20px}}" +
-      "@media(max-height:480px){.aTitleBar{padding-top:6px;padding-bottom:4px}.aTabs{margin-bottom:4px}.aTabs button{min-height:36px!important;padding:4px!important}#aQuick{padding-bottom:4px}#aFileHead{padding-top:4px;padding-bottom:4px}#aFileBar{padding-top:8px;padding-bottom:8px}}";
+      "@media(max-height:480px){.aTitleBar{padding-top:6px;padding-bottom:4px}.aTabs{margin-bottom:4px}.aTabs button{min-height:36px!important;padding:4px!important}#aQuick{padding-bottom:4px}#aFileHead{padding-top:4px;padding-bottom:4px}#aFileBar{padding-top:8px;padding-bottom:8px}}" +
+      /* 宽且矮的横屏（外屏折叠态 931×415）：问题不在宽度而在纵向——标题/存储切换/快捷路径/
+         路径栏/排序栏 5 层堆掉可用高的 74%，列表只剩 76px。这里把宽度换成高度：tabs 与
+         快捷路径挪成左侧 rail、路径栏与排序栏并成一行，列表拿回约 250px。
+         规则全锁在 max-height:520px，内屏展开（845×919）与竖屏外屏（415×931）都不会命中。 */
+      "@media(min-width:700px) and (max-height:520px){" +
+      "#aFileMask{padding:calc(env(safe-area-inset-top,0px) + 4px) 6px calc(env(safe-area-inset-bottom,0px) + 4px);}" +
+      "#aFileBox{max-width:none;width:100%;height:100%;border-radius:12px;}" +
+      ".aTitleBar{padding:0 12px;min-height:48px;}.aTitleBar h2{font-size:16px;}.aTitleBar .aIcon{width:48px;}" +
+      ".aFileLayout{flex-direction:row;}" +
+      ".aFileSidebar{flex:0 0 96px;border-right:1px solid #ffffff10;padding-top:6px;}" +
+      "#aFileMask .aTabs{flex-direction:column;margin:0 6px 8px;gap:4px;}" +
+      "#aFileMask .aTabs button{flex:none;min-height:48px!important;font-size:13px;padding:6px 8px!important;text-align:left;}" +
+      "#aFileMask #aQuick{flex-direction:column;overflow-y:auto;padding:0 6px;gap:4px;}" +
+      "#aFileMask #aQuick button{min-height:48px;font-size:12px;text-align:left;white-space:normal;}" +
+      ".aFileMain{display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-rows:48px minmax(0,1fr);grid-template-areas:'head tools' 'list list';}" +
+      "#aFileHead{grid-area:head;padding:0 10px;border:0;}" +
+      "#aFileTools{grid-area:tools;padding:0 10px 0 0;border:0;}" +
+      "#aFileList{grid-area:list;padding:6px 8px;}" +
+      "#aSourceForm{grid-column:1/-1;grid-row:2;min-height:0;}" +
+      "#aFileBar{grid-column:1/-1;}" +
+      "#aFileList.is-grid{grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:8px;}" +
+      ".aMeta{font-size:12px;}" +
+      "#aFileMask button,#aFileMask select{min-height:48px;}" +
+      "}";
     document.head.appendChild(style);
     mask = node("div"); mask.id = "aFileMask"; mask.hidden = true;
     mask.setAttribute("role", "dialog"); mask.setAttribute("aria-modal", "true"); mask.setAttribute("aria-labelledby", "aPickerTitle");

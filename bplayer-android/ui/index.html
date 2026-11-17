@@ -492,13 +492,12 @@
 
       <div class="settings-row">
         <label><input type="checkbox" id="optAutoAudio" /> 自动转换不支持的音轨</label>
-        <div class="settings-desc">自动处理默认音轨，不会改选其它语言或评论轨。关闭后仍可复用已验证的同目录 .mka 缓存；需要新转换时可到音轨菜单明确选择。</div>
+        <div class="settings-desc">自动转码核心不支持的默认音轨为mka文件并挂载播放。</div>
       </div>
 
       <div class="settings-row">
         <label><input type="checkbox" id="optAutoSubtitle" /> 自动转换不支持的字幕</label>
-        <div class="settings-desc">开片时自动抽取内嵌文本字幕轨。有 Cues 索引的片子约 0.2 秒，没有的要顺序读一遍整个文件（40 GB 约 4 分钟），所以默认关闭；需要时在「字幕」菜单里手动选。PGS 位图字幕走即时解码，不受此项影响。</div>
-        <div class="settings-desc">内嵌字幕只读进内存，<b>不写任何文件</b></div>
+        <div class="settings-desc">自动转码核心不支持的内置字幕到内存中并挂载播放。</div>
       </div>
 
       <div class="settings-foot">音轨自动转换默认开启：内核解不了的音轨会自动转成外挂 AAC 并静音原轨，不会放出错的轨道。字幕的自动转换要读整片，默认关闭。同目录的外挂字幕、同名弹幕照旧自动加载。</div>
@@ -1674,7 +1673,12 @@
           audioStatus('音轨' + externalOrdinal + ' 已挂载，已跟随当前播放进度。' + (selection.legacy ? ' 旧缓存：源版本校验有限。' : ''), false);
         },
         disabled: function (selection) {
-          clearAudioPill(); audioStatus('默认音轨需要兼容处理，自动转换已关闭。可点击音轨' + (selection.audioIndex + 1) + ' 手动处理；原轨保持静音，避免误播其它语言。', false);
+          clearAudioPill();
+          // 「处理中」是 selecting 钩子按 phase=preparing 画上去的；走到这里相位已经变成
+          // disabled（自动转换关闭），不重画菜单就会一直停在「处理中」——用户明明关了
+          // 自动转换，却以为后台还在转。
+          refreshAudioMenu();
+          audioStatus('默认音轨需要兼容处理，自动转换已关闭。可点击音轨' + (selection.audioIndex + 1) + ' 手动处理；原轨保持静音，避免误播其它语言。', false);
         },
         progress: function (progress) {
           updateAudioPill(Number(progress.percent), Number(progress.written) || 0);

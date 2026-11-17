@@ -75,10 +75,11 @@ internal object AudioMedia {
     return true to 0.0
   }
 
-  fun checkSpace(context: Context, duration: Double?, localTarget: Boolean) {
+  // 分片并行后峰值暂存 = Σ段（≈产物）+ 最终 staging（≈产物）≈ 2× 产物，本地与远程目标都按 2× 预留。
+  fun checkSpace(context: Context, duration: Double?, @Suppress("UNUSED_PARAMETER") localTarget: Boolean) {
     val estimate = if (duration == null) MAX_AUDIO_BYTES else (duration * 26000 + 16 * 1024 * 1024).toLong()
     if (estimate > MAX_AUDIO_BYTES) throw NetworkFailure("音轨预计超过 512 MiB 单任务上限")
-    val required = estimate * (if (localTarget) 2 else 1) + 32 * 1024 * 1024
+    val required = estimate * 2 + 32 * 1024 * 1024
     if (StatFs(context.cacheDir.absolutePath).availableBytes < required) {
       throw NetworkFailure("手机可用空间不足，音轨转换与缓存发布需要约 ${required / 1024 / 1024} MiB 临时空间")
     }
