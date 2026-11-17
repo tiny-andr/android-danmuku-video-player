@@ -101,7 +101,8 @@
       if (frame != null) { cancelAnimationFrame(frame); frame = null; }
       flush(); suppressClickUntil = Date.now() + 400;
       if (event) { event.preventDefault(); event.stopImmediatePropagation(); }
-      hideTimer = setTimeout(function () { if (hud) hud.hidden = true; }, 700);
+      // 亮度/音量 HUD 的停留时间同样按 60% 缩短：700 → 420
+      hideTimer = setTimeout(function () { if (hud) hud.hidden = true; }, 420);
     } else if (event && event.type === "touchend" && finished.axis === "pending" && finished.zone !== "center" && Date.now() - finished.started < 300) {
       event.preventDefault(); event.stopImmediatePropagation(); suppressClickUntil = Date.now() + 400;
       if (tap && tap.zone === finished.zone && Date.now() - tap.time < 320) {

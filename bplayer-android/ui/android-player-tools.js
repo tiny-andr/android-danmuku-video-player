@@ -93,9 +93,13 @@
     var hours = Math.floor(seconds / 3600); var minutes = Math.floor(seconds % 3600 / 60);
     return (hours ? hours + ":" + String(minutes).padStart(2, "0") : String(minutes)) + ":" + String(seconds % 60).padStart(2, "0");
   }
+  // 播放页内的短提示（适应/裁剪、快进后退、音频焦点）。停留时间统一按 60% 缩短
+  // （用户 2026-11-17 要求）：默认 1500→900，快进/后退传的 850→510。
+  // 缩放只做在出口，调用点仍按「这条有多重要」传值，分级关系不变。
+  var NOTICE_TIME_SCALE = 0.6;
   function notify(message, duration) {
     ensure(); clearTimeout(noticeTimer); notice.textContent = message; notice.hidden = false;
-    noticeTimer = setTimeout(function () { notice.hidden = true; }, duration || 1500);
+    noticeTimer = setTimeout(function () { notice.hidden = true; }, Math.round((duration || 1500) * NOTICE_TIME_SCALE));
   }
   function abandonFocus() {
     try { if (window.AndroidPlaybackAudio) window.AndroidPlaybackAudio.abandonFocus(); } catch (error) {}

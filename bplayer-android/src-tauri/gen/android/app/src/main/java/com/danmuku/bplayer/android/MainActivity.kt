@@ -11,6 +11,7 @@ import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
+import android.view.View
 import android.widget.Toast
 import org.json.JSONObject
 import android.os.Build
@@ -74,7 +75,10 @@ class MainActivity : TauriActivity() {
     }
 
   private fun requestStorageAccess() {
-    Toast.makeText(this, "请允许「所有文件访问权限」，返回本应用后再次点击即可浏览", Toast.LENGTH_LONG).show()
+    // 提示停留时间统一按 60% 缩短（用户 2026-11-17 要求）。原生 Toast 只有两档，
+    // LONG≈3.5s、SHORT≈2s（≈57%），取 SHORT；读不完也不影响后续步骤——
+    // 跳转前还有一次同样的提示，返回首页后常驻的权限横幅会继续引导。
+    Toast.makeText(this, "请允许「所有文件访问权限」，返回本应用后再次点击即可浏览", Toast.LENGTH_SHORT).show()
     val packageUri = Uri.fromParts("package", packageName, null)
     val primary = if (Build.VERSION.SDK_INT >= 30) {
       Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, packageUri)
@@ -149,6 +153,9 @@ class MainActivity : TauriActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
     enableEdgeToEdge()
     super.onCreate(savedInstanceState)
+    // enableEdgeToEdge() 在 super 之前调用，Tauri/WryActivity 的 onCreate 之后可能重置
+    // decorFits，这里再钉一次：内容是 edge-to-edge 的，否则底部系统条区域会被当成布局边界。
+    WindowCompat.setDecorFitsSystemWindows(window, false)
     window.decorView.viewTreeObserver.addOnGlobalLayoutListener { applyKeepScreenOn() }
     contentResolver.registerContentObserver(Settings.System.getUriFor(Settings.System.ACCELEROMETER_ROTATION), false, rotationObserver)
     applyPlaybackOrientation()
@@ -334,8 +341,31 @@ class MainActivity : TauriActivity() {
       controller.systemBarsBehavior =
         WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
       controller.hide(WindowInsetsCompat.Type.systemBars())
+      applyLegacyImmersive(true)
     } else {
       controller.show(WindowInsetsCompat.Type.systemBars())
+      applyLegacyImmersive(false)
+    }
+  }
+
+  // 荣耀折叠屏（MagicOS）开了桌面任务栏（secure is_taskbar_switch_open=1）时，只调
+  // WindowInsetsController.hide(systemBars()) 不够：系统仍按「任务栏 + 导航栏」缩小窗口的
+  // appBounds，播放页底部会露出约 141 CSS px 的系统条（实测窗口 2156x1983，屏幕 2156x2344，
+  // 同机系统设置窗口是全屏 2156x2344，且它的 vsysui 带 IMMERSIVE 位）。补上旧式
+  // systemUiVisibility 位后 appBounds 才回到全屏。
+  @Suppress("DEPRECATION")
+  private fun applyLegacyImmersive(on: Boolean) {
+    window.decorView.systemUiVisibility = if (on) {
+      View.SYSTEM_UI_FLAG_LAYOUT_STABLE or
+        View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or
+        View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
+        View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
+        View.SYSTEM_UI_FLAG_FULLSCREEN or
+        View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+    } else {
+      View.SYSTEM_UI_FLAG_LAYOUT_STABLE or
+        View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or
+        View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
     }
   }
 }

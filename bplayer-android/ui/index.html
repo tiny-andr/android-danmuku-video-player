@@ -754,6 +754,11 @@
     try { console.warn('[inline notice, no surface]', text); } catch (e) { }
   }
 
+  // 所有提示的停留时间统一压到 60%（用户 2026-11-17 要求）。缩放放在 toast() 出口做，
+  // 而不是逐个改调用点的 5000/8000：调用点只关心「这条有多重要」，重要程度的分级不变，
+  // 整体节奏一起变短；以后新加的提示也自动跟着新节奏走，不会再出现漏改的一处。
+  var TOAST_TIME_SCALE = 0.6;
+
   function toast(msg, ms) {
     if (!toastAllowed()) {
       try { console.warn('[toast suppressed: not on player]', msg); } catch (e) { }
@@ -765,7 +770,7 @@
     if (len > 20) {
       dur = Math.max(dur * 2, 1500 + len * 250);
     }
-    var total = Math.min(dur, 20000);
+    var total = Math.round(Math.min(dur, 20000) * TOAST_TIME_SCALE);
 
     var alive = liveToasts();
     while (alive.length >= TOAST_MAX) removeToast(alive.shift());
@@ -2763,7 +2768,8 @@
         el.hidden = true;
         el.textContent = '';
         settingsNoteTimer = 0;
-      }, 5000);
+      }, 3000); // 提示停留时间统一按 60% 缩短（原 5000）
+
     }
   }
 
