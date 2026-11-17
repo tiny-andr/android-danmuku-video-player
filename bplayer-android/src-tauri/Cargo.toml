@@ -20,6 +20,10 @@ serde_json = "1"
 # 交叉编译到 aarch64-linux-android 与桌面版同一套依赖。
 libpgs = "0.6"
 png = "0.17"
+# 网络源的内嵌字幕抽取要和本地一样「按 Cues 稀疏读」：Android 上没有可挂载的
+# SMB 路径，只能经本机媒体代理按 HTTP Range 随机读。ureq 关掉 TLS（走 127.0.0.1
+# 明文），依赖小、能交叉编译到 aarch64-linux-android。
+ureq = { version = "2", default-features = false }
 
 [profile.release]
 opt-level = 3

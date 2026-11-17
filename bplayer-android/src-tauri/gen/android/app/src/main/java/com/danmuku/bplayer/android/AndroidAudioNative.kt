@@ -32,6 +32,7 @@ internal class AndroidAudioNative(context: Context, private val webView: WebView
   private val tasks = ConcurrentHashMap<String, Task>()
   private val permits = ConcurrentHashMap<String, Permit>()
   private val streams = ConcurrentHashMap<String, StreamState>()
+  private val readers = ConcurrentHashMap<String, AudioSourceAccess>()
   private val cancelled = ConcurrentHashMap.newKeySet<String>()
   private val cancelledJobs = ConcurrentHashMap.newKeySet<String>()
   @Volatile private var worker: AudioWorkerClient? = null
@@ -43,7 +44,7 @@ internal class AndroidAudioNative(context: Context, private val webView: WebView
     if (closed || id.length > 256) return
     webView.post {
       if (closed || !trustedPage()) return@post
-      if (argsJson.length > 65536 || command !in setOf("audio_probe", "audio_prepare", "audio_start", "audio_cancel", "audio_cache_files", "network_subtitle", "audio_stream_open", "audio_stream_read", "audio_stream_close")) {
+      if (argsJson.length > 65536 || command !in setOf("audio_probe", "audio_prepare", "audio_start", "audio_cancel", "audio_cache_files", "network_subtitle", "audio_stream_open", "audio_stream_read", "audio_stream_close", "subtitle_reader", "subtitle_reader_close")) {
         reply(id, false, "不支持或过大的音轨请求"); return@post
       }
       val args = runCatching { JSONObject(argsJson) }.getOrElse { reply(id, false, "音轨请求格式不正确"); return@post }
@@ -158,6 +159,29 @@ internal class AndroidAudioNative(context: Context, private val webView: WebView
               }
               "audio_stream_close" -> {
                 streams[args.optString("streamId")]?.let { closeStream(it) }
+                reply(id, true, JSONObject.NULL)
+              }
+              // 网络源的内嵌字幕抽取：Rust 需要能随机读的字节源，这里给它一个本机媒体
+              // 代理 URL（按 Range 取字节）。代理必须活到抽取结束，所以由 readerId 持有。
+              "subtitle_reader" -> task(session) { readerId, cancellation ->
+                val video = args.getString("videoPath")
+                if (!video.startsWith("/@network/")) throw NetworkFailure("只有网络视频需要字幕读取器")
+                val source = AudioSourceAccess(context, video, cancellation)
+                try {
+                  // 字幕稀疏抽取是"跳着读小块"，预读必须压到 64 KiB：4 MiB 预读会让每次
+                  // 256 KiB 的 Range 请求白拉 4 MiB，正好把稀疏读的优势抵消干净。
+                  val url = source.input(video, prefetchBytes = 64 * 1024)
+                  val stat = source.stat()
+                  if (stat.kind != "file" || stat.size <= 0) throw NetworkFailure("视频不是有效文件")
+                  readers[readerId] = source
+                  reply(id, true, JSONObject().put("readerId", readerId).put("url", url).put("size", stat.size))
+                } catch (error: Exception) {
+                  runCatching { source.close() }
+                  throw error
+                }
+              }
+              "subtitle_reader_close" -> {
+                readers.remove(args.optString("readerId"))?.let { runCatching { it.close() } }
                 reply(id, true, JSONObject.NULL)
               }
             }
@@ -444,12 +468,16 @@ internal class AndroidAudioNative(context: Context, private val webView: WebView
       permits.clear()
       // 后台不转码：回到前台重新选音轨会再开一条，省电也省 CPU
       streams.values.toList().forEach { closeStream(it) }
+      readers.values.forEach { runCatching { it.close() } }
+      readers.clear()
     }
   }
   override fun close() {
     closed = true
     tasks.values.forEach { it.cancellation.cancel() }
     streams.values.toList().forEach { closeStream(it) }
+    readers.values.forEach { runCatching { it.close() } }
+    readers.clear()
     permits.clear(); executor.shutdownNow(); worker?.close(); worker = null
   }
 }

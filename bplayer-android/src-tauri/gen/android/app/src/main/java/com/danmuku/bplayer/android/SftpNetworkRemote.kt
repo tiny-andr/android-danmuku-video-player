@@ -110,7 +110,7 @@ internal class SftpNetworkRemote(private val source: NetworkSource) : NetworkRem
   }
 
   @Synchronized
-  override fun open(relative: String, start: Long, length: Long, total: Long): InputStream {
+  override fun open(relative: String, start: Long, length: Long, total: Long, prefetchBytes: Int): InputStream {
     val file = sftp.open(checked(relative), setOf(OpenMode.READ))
     try {
       if (file.length() != total) throw NetworkFailure("远端文件大小已改变，请重新打开视频")

@@ -39,7 +39,9 @@ internal class NetworkMediaServer(
   private val role: NetworkRole = NetworkRole.MEDIA,
   private val allowedPath: String? = null,
   private val maxReadBytes: Long? = null,
-  private val sourceSnapshot: NetworkSource? = null
+  private val sourceSnapshot: NetworkSource? = null,
+  // 顺序播放要大的预读拉吞吐；字幕稀疏抽取这种跳读必须压小，否则每读一小块都白拉几 MiB
+  private val prefetchBytes: Int = DEFAULT_PREFETCH_BYTES
 ) : NanoHTTPD("127.0.0.1", 0) {
   private val bytesRead = java.util.concurrent.atomic.AtomicLong()
   private val token = ByteArray(32).also { SecureRandom().nextBytes(it) }
@@ -92,7 +94,7 @@ internal class NetworkMediaServer(
         }
         val input = if (session.method == Method.HEAD || range.length == 0L) ByteArrayInputStream(ByteArray(0))
           else track(path.id, bounded(connections.watch(source, role, remote,
-            remote.open(path.relative, range.start, range.length, stat.size))))
+            remote.open(path.relative, range.start, range.length, stat.size, prefetchBytes))))
         val response = newFixedLengthResponse(if (header == null) Response.Status.OK else Response.Status.PARTIAL_CONTENT,
           mime(path.relative), input, range.length)
         response.setRequestMethod(session.method)

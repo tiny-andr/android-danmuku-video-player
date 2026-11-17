@@ -164,12 +164,12 @@ internal class AudioSourceAccess(context: Context, val path: String, private val
     return digest.digest().joinToString("") { "%02x".format(it) }
   }
 
-  fun input(candidate: String = path, probing: Boolean = false): String {
+  fun input(candidate: String = path, probing: Boolean = false, prefetchBytes: Int = DEFAULT_PREFETCH_BYTES): String {
     cancellation.check(); checkConfiguration()
     if (!network) return File(candidate).canonicalPath
     val connections = NetworkConnections()
     val server = NetworkMediaServer(store!!, connections, NetworkRole.TRANSCODE, candidate,
-      if (probing) 32 * 1024 * 1024L else null, configuredSource)
+      if (probing) 32 * 1024 * 1024L else null, configuredSource, prefetchBytes)
     synchronized(proxies) { proxies.add(server to connections) }
     cancellation.onCancel { connections.close(); server.shutdown() }
     return server.mediaUrl(candidate)

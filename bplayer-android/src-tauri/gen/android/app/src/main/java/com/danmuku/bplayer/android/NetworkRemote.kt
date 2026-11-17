@@ -21,7 +21,11 @@ internal interface NetworkRemote : Closeable {
   fun abort() = Unit
   fun list(relative: String): List<RemoteEntry>
   fun stat(relative: String): RemoteStat
-  fun open(relative: String, start: Long, length: Long, total: Long): InputStream
+  /**
+   * `prefetchBytes` 是单次远端读的放大倍数。顺序播放用 4 MiB 把吞吐拉满；像字幕稀疏
+   * 抽取这种"跳着读小块"的用法必须把它压小，否则每读 256 KiB 都会白拉 4 MiB。
+   */
+  fun open(relative: String, start: Long, length: Long, total: Long, prefetchBytes: Int = DEFAULT_PREFETCH_BYTES): InputStream
   fun publishAudioCache(videoRelative: String, audioIndex: Int, jobId: String, input: java.io.File,
     expected: RemoteStat, cancellation: AudioCancellation): String =
     throw NetworkFailure("此网络存储不支持安全发布音轨缓存")
@@ -29,16 +33,19 @@ internal interface NetworkRemote : Closeable {
     throw NetworkFailure("此网络存储不支持受限随机读取")
 }
 
+internal const val DEFAULT_PREFETCH_BYTES = 4 * 1024 * 1024
+
 internal class PositionedNetworkStream(
   private var position: Long,
   private var remaining: Long,
   private val reader: (Long, ByteArray, Int, Int) -> Int,
-  private val closer: () -> Unit
+  private val closer: () -> Unit,
+  prefetchBytes: Int = DEFAULT_PREFETCH_BYTES
 ) : InputStream() {
   // NanoHTTPD 的 Response 每次只读 16 KiB（Response.BUFFER_SIZE）。如果直接把它转成 SMB 读，
   // 局域网每 16 KiB 就要往返一次，吞吐被锁在个位数 MB/s，4K 直读必然一直缓冲。
-  // 这里自己预读 1 MiB，把远端读放大 64 倍，上层那 16 KiB 的循环基本都命中缓冲。
-  private val prefetch = ByteArray(4 * 1024 * 1024)
+  // 这里自己预读几 MiB，把远端读放大，上层那 16 KiB 的循环基本都命中缓冲。
+  private val prefetch = ByteArray(prefetchBytes.coerceAtLeast(16 * 1024))
   private var prefetchStart = -1L
   private var prefetchLength = 0
   @Volatile private var closed = false

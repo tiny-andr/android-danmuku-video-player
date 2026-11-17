@@ -27,17 +27,17 @@ const fresh = initialize(null);
 assert.equal(fresh.context.appSettings.keepScreenOn, true);
 assert.deepEqual(fresh.calls, [true]);
 
-const migrated = initialize(JSON.stringify({ ver: 2, autoAudio: false, autoSubtitle: true }));
+const migrated = initialize(JSON.stringify({ ver: 3, autoAudio: false, autoSubtitle: true }));
 assert.equal(migrated.context.appSettings.keepScreenOn, true);
 assert.equal(migrated.context.appSettings.autoAudio, false);
 assert.equal(migrated.context.appSettings.autoSubtitle, true);
 
-const disabled = initialize(JSON.stringify({ ver: 2, autoAudio: false, autoSubtitle: true, keepScreenOn: false }));
+const disabled = initialize(JSON.stringify({ ver: 3, autoAudio: false, autoSubtitle: true, keepScreenOn: false }));
 assert.equal(disabled.context.appSettings.keepScreenOn, false);
 assert.deepEqual(disabled.calls, [false]);
 vm.runInContext('saveAppSettings()', disabled.context);
 const persisted = JSON.parse(disabled.values.get('bplayer_settings'));
-assert.deepEqual(persisted, { ver: 2, autoAudio: false, autoSubtitle: true, keepScreenOn: false });
+assert.deepEqual(persisted, { ver: 3, autoAudio: false, autoSubtitle: true, keepScreenOn: false });
 assert.equal(initialize(JSON.stringify(persisted)).context.appSettings.keepScreenOn, false);
 
 vm.runInContext('appSettings.keepScreenOn = true; saveAppSettings(); applyKeepScreenOn()', disabled.context);

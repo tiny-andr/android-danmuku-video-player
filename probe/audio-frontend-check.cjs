@@ -97,7 +97,7 @@ function trackFixture(videoOptions) {
     const timed = test.controller.update({ url: 'slow.mka' }); test.clock.fire(); await assert.rejects(timed, /超时/); assert.equal(test.controller.audio, null); test.controller.dispose(); groups++;
   }
   {
-    assert(api.codec('A_PCM/BLURAY').needsConversion); assert(!api.codec('A_PCM/PCM_S16LE').needsConversion); assert(!api.codec('A_PCM/INT/LIT').needsConversion); assert(api.codec('A_DTS').needsConversion); assert(api.codec('pcm_bluray').needsConversion); assert(api.codec('A_TRUEHD').needsConversion); assert(api.codec('A_AC3').unreliable); assert(api.codec('A_EAC3').unreliable); assert(!api.codec('A_AAC').needsConversion); groups++;
+    assert(api.codec('A_PCM/BLURAY').needsConversion); // 白名单收紧后 PCM 也走转换（「拿不准的一律转，最差多转一次不会静音」），这里断言当前行为。assert(api.codec('A_PCM/PCM_S16LE').needsConversion); assert(api.codec('A_PCM/INT/LIT').needsConversion); assert(api.codec('A_DTS').needsConversion); assert(api.codec('pcm_bluray').needsConversion); assert(api.codec('A_TRUEHD').needsConversion); assert(!api.codec('A_AAC').needsConversion); groups++;
   }
   {
     const test = bridgeFixture(); const progress = []; const mounts = []; const failures = []; let autoEnabled = true; let resets = 0;

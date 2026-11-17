@@ -594,18 +594,29 @@
   // 1.2.6：弹幕默认改为 极慢 / 同步速度 / 显示区域 1/4 / 不透明 100%，旧存档按新默认走一次
   var CONFIG_VER = 3;
 
-  /* ---- 应用设置（齿轮页）：音轨自动转换默认开，字幕默认关 ---- */
+  /* ---- 应用设置（齿轮页）：音轨与字幕的自动转换都默认开 ---- */
   var SETTINGS_KEY = 'bplayer_settings';
-  var SETTINGS_VER = 2; // 1.2.6 起音轨自动转换改为默认开启；旧存档没有版本号，一律按新默认走一次
-  var appSettings = { autoAudio: true, autoSubtitle: false, keepScreenOn: true };
+  // 3：字幕自动转换改成默认开。
+  var SETTINGS_VER = 3;
+  var appSettings = { autoAudio: true, autoSubtitle: true, keepScreenOn: true };
 
   function loadAppSettings() {
     try {
       var c = JSON.parse(localStorage.getItem(SETTINGS_KEY)) || {};
-      if (c.ver !== SETTINGS_VER) return; // 旧版存档：沿用新的默认值
-      appSettings.autoAudio = !!c.autoAudio;
-      appSettings.autoSubtitle = !!c.autoSubtitle;
-      appSettings.keepScreenOn = c.keepScreenOn !== false;
+      if (c.ver === SETTINGS_VER) {
+        appSettings.autoAudio = !!c.autoAudio;
+        appSettings.autoSubtitle = !!c.autoSubtitle;
+        appSettings.keepScreenOn = c.keepScreenOn !== false;
+        return;
+      }
+      // 2 版存档里的 autoSubtitle=false 是当时的默认值，不是用户主动关的，只把这一项
+      // 提到新默认；音轨开关和常亮是用户真的调过的，原样保留。
+      if (c.ver === 2) {
+        appSettings.autoAudio = !!c.autoAudio;
+        appSettings.keepScreenOn = c.keepScreenOn !== false;
+        return;
+      }
+      // 更老的存档没有可迁移字段：整体沿用新默认。
     } catch (e) { /* 配置损坏按默认值 */ }
   }
 
@@ -1090,7 +1101,7 @@
     }
   }
 
-  function applyDanmakuText(name, text, t0) {
+  function applyDanmakuText(name, text, t0, auto) {
     var list;
     if (/\.json$/i.test(name)) list = parseJsonDanmaku(text);
     else list = parseBiliXml(text);
@@ -1101,7 +1112,12 @@
     $('infobar').hidden = false;
     $('infoCount').textContent = list.length.toLocaleString() + ' 条';
     $('infoParse').textContent = ms + ' ms';
-    if (!window.AndroidPlayback) toast('已装载 ' + list.length.toLocaleString() + ' 条弹幕');
+    // 自动配对和手动加载合并成一条提示：以前「已自动加载同名弹幕」和「已装载 N 条」
+    // 前后脚各弹一次，一次开片就多占一格，看着像发生了两件事。
+    if (!window.AndroidPlayback) {
+      if (auto) toast('已自动加载同名弹幕 · ' + list.length.toLocaleString() + ' 条');
+      else toast('已装载 ' + list.length.toLocaleString() + ' 条弹幕');
+    }
   }
 
   /* 弹幕解析任务代际：切换视频/清空后，过期解析结果直接丢弃。
@@ -1493,7 +1509,7 @@
       }
     }
 
-    function desktopLoadDanmaku(name, text, owner) {
+    function desktopLoadDanmaku(name, text, owner, auto) {
       owner = owner || { video: videoLoadToken, path: currentVideoPath, selection: danmakuSelectionGeneration };
       var token = ++danmakuLoadToken;
       var started = performance.now();
@@ -1501,7 +1517,7 @@
         setTimeout(function () {
           if (token !== danmakuLoadToken || !ownsSidecar(owner, 'danmaku')) { resolve(false); return; }
           try {
-            applyDanmakuText(name, text, started);
+            applyDanmakuText(name, text, started, auto);
             activeDanmakuName = name;
             $('danmakuStatus').textContent = '已载入：' + name + ' · ' + danmakuList.length.toLocaleString() + ' 条';
             resolve(true);
@@ -1952,13 +1968,74 @@
     var STREAM_QUEUE_BYTES = 2 * 1024 * 1024;
     var streamAudio = null;
     var streamRestartTimer = 0;
+    var streamTrimTimer = 0;
+    var streamTick = 0;
+    var STREAM_AHEAD_MAX = 120;   // 缓冲领先播放头超过这么多秒就停止消费（背压）
+    var STREAM_KEEP_BACK = 60;    // 播放头之前保留这么多秒供回拖，再往前回收
 
     function streamSupported() {
       return !!(window.MediaSource && typeof MediaSource.isTypeSupported === 'function'
         && MediaSource.isTypeSupported(STREAM_MIME));
     }
 
+    function streamPlayhead() {
+      var t = Number(art && art.currentTime) || 0;
+      // NaN 参与比较永远为 false：算不出来时「领先太多要停手」会被判成「继续拉」，
+      // 一路把 MSE 配额拉爆，所以这里必须给出确定的数。
+      return isFinite(t) && t > 0 ? t : 0;
+    }
+
+    function streamBufferedEnd(s) {
+      if (!s || !s.sb) return 0;
+      try { var b = s.sb.buffered; return b.length ? b.end(b.length - 1) : 0; } catch (error) { return 0; }
+    }
+
+    function streamAheadFull(s) {
+      return (streamBufferedEnd(s) - streamPlayhead()) > STREAM_AHEAD_MAX;
+    }
+
+    // 回收播放头之前的老缓冲。
+    //
+    // MediaSource 只进不出：长片播到后面时 buffered 是从片头一路攒到播放头的，
+    // 192k AAC 播两三个小时就是上百 MB，必然撞上 SourceBuffer 配额。每次把「播放头
+    // 前 60 秒」以外的部分 remove 掉，占用就恒定为「回看 60 + 前瞻 120」≈ 4 MB。
+    // 返回 true 表示刚发起 remove（它还会触发一次 updateend，届时继续 append）。
+    function trimStreamBuffer() {
+      var s = streamAudio;
+      if (!s || s.stopped || !s.sb || s.sb.updating) return false;
+      // ended 之后 SourceBuffer.remove 会抛 InvalidStateError；短片转完就 ended，确实不需要再回收。
+      if (!s.ms || s.ms.readyState !== 'open') return false;
+      var b;
+      try { b = s.sb.buffered; } catch (error) { return false; }
+      if (!b.length) return false;
+      var now = streamPlayhead();
+      if (!now) now = s.startSecs;
+      var keepFrom = now - STREAM_KEEP_BACK;
+      var first = b.start(0);
+      if (keepFrom > first + 5) {
+        try {
+          s.sb.remove(first, keepFrom);
+          diag('stream-trim', { from: Math.round(first), to: Math.round(keepFrom), now: Math.round(now) });
+          return true;
+        }
+        catch (error) { diag('stream-trim-fail', { err: String(error) }); }
+      }
+      return false;
+    }
+
+    // 每秒驱动一次消费 + 每 5 秒回收：转码远快于播放，数据一次性到齐后不会再有
+    // updateend，光靠 append 回调既消费不完也回收不了。
+    function startStreamTicker() {
+      if (streamTrimTimer) clearInterval(streamTrimTimer);
+      streamTrimTimer = setInterval(function () {
+        if (!streamAudio) { clearInterval(streamTrimTimer); streamTrimTimer = 0; return; }
+        appendStreamChunk();
+        if ((streamTick++ % 5) === 0) trimStreamBuffer();
+      }, 1000);
+    }
+
     function stopStreamAudio() {
+      if (streamTrimTimer) { clearInterval(streamTrimTimer); streamTrimTimer = 0; }
       if (streamRestartTimer) { clearTimeout(streamRestartTimer); streamRestartTimer = 0; }
       var s = streamAudio;
       if (!s) return;
@@ -1997,8 +2074,12 @@
           var settled = false;
           s.settle = function (ok) { if (!settled) { settled = true; resolve(!!ok); } };
           streamAudio = s;
+          startStreamTicker();
           ms.addEventListener('sourceopen', function () {
             if (s.stopped) return;
+            // 同一个 MediaSource 的 sourceopen 会重复触发（sb.remove() 之后实测会再来一次）；
+            // 重复走 addSourceBuffer 会抛 NotSupportedError，把整条流误判成「内核不支持」。
+            if (s.sb) return;
             try { s.sb = ms.addSourceBuffer(opened.mime || STREAM_MIME); }
             catch (error) { diag('stream-sb-fail', { err: String(error) }); s.settle(false); stopStreamAudio(); return; }
             s.sb.mode = 'segments';
@@ -2033,6 +2114,7 @@
     function appendStreamChunk() {
       var s = streamAudio;
       if (!s || s.stopped || !s.sb || s.appending || !s.queue.length || s.sb.updating) return;
+      if (!s.eof && streamAheadFull(s)) return; // 窗口满了就先攒着，等播放把位置腾出来
       var chunk = s.queue.shift();
       s.appending = true;
       s.queued = Math.max(0, s.queued - chunk.length);
@@ -2057,6 +2139,9 @@
       var s = streamAudio;
       if (!s || s.stopped) return;
       s.appending = false;
+      // 先回收播放头之前的老缓冲，否则长片播两三个小时必炸配额。
+      // remove 会再触发一次 updateend，那次回来时窗口已经挪过，不会再删。
+      if (!s.eof && trimStreamBuffer()) return;
       if (s.queue.length) { appendStreamChunk(); return; }
       if (s.eof) { try { if (s.ms.readyState === 'open') s.ms.endOfStream(); } catch (error) { } return; }
       pullStreamChunk();
@@ -2067,6 +2152,7 @@
       var s = streamAudio;
       if (!s || s.stopped || s.eof || s.pulling || !s.sb || s.appending || s.sb.updating) return;
       if (s.queued >= STREAM_QUEUE_BYTES) return;
+      if (streamAheadFull(s)) return; // 前瞻够了就不拉：原生侧队列满后 ffmpeg 自己阻塞
       s.pulling = true;
       window.AndroidAudioTasks.request('audio_stream_read', {
         streamId: s.id, session: s.session, maxBytes: STREAM_CHUNK_BYTES
@@ -2416,37 +2502,71 @@
       });
     }
 
-    // 网络视频的内嵌文本字幕：Rust 提取器只认本地路径，改由 ffmpeg worker 经媒体代理把
-    // 字幕轨转成 srt 落到 cache，再读回内存挂载。取消/换片语义与本地链路一致：token 变了
-    // 或换了片，回包直接作废。
+    // 网络视频的内嵌文本字幕：首选和本地完全相同的稀疏抽取（Rust 解析 Cues，只读字幕块），
+    // 字节来源换成媒体代理的 HTTP Range。只有在稀疏抽取拿不到结果时才退回 ffmpeg 顺序抽取
+    // —— 那条路要读完整片，7.5 GB 的片在手机上要四十分钟，和桌面经验完全对不上。
     function extractNetworkSubtitle(item, silent) {
       if (!window.AndroidAudioTasks || !window.AndroidAudioTasks.request) { toast('字幕抽取桥未就绪', 8000); return; }
       var want = normPath(currentVideoPath);
       var subToken = ++subExtractToken;
+      var session = window.AndroidAudioTasks.currentSession;
+      var ordinalIndex = Math.max(0, (item.ordinal || 1) - 1);
       pendingSub = item;
       transcodeVideo = currentVideoPath;
       transcodeOrdinal = -1;
       updateSubPill('extract');
-      window.AndroidAudioTasks.request('network_subtitle', {
-        videoPath: currentVideoPath,
-        trackIndex: Math.max(0, (item.ordinal || 1) - 1),
-        session: window.AndroidAudioTasks.currentSession,
-      }, { timeoutMs: 900000 }).then(function (got) {
+      // 只抽用户点的那一条：网络源每条轨的每个 cue 都要一次远端小读，三条轨一起抽
+      // 就是三倍等待。本地文件因为 Cues 命中是毫秒级，才可以一次抽整批。
+      var batch = [];
+      if (item.track) batch.push({ index: ordinalIndex, track: item.track, ass: item.codecLabel === 'ASS' });
+      var readerId = '';
+      function closeReader() {
+        if (!readerId) return;
+        var rid = readerId; readerId = '';
+        window.AndroidAudioTasks.request('subtitle_reader_close', { readerId: rid, session: session }).catch(function () { });
+      }
+      function settle(text) {
         if (subToken !== subExtractToken) return;
         if (normPath(currentVideoPath) !== want) return;
         pendingSub = null; clearSubPill(); transcodeVideo = ''; transcodeOrdinal = -1;
-        var path = got && got.path;
-        if (!path) { toast('这条内嵌字幕抽不出来', 8000); return; }
-        return invoke('read_text', { path: path }).then(function (text) {
+        if (!text) { toast('这条内嵌字幕抽不出来', 8000); return; }
+        mountSubtitleText(text, item, silent);
+      }
+      function fallback(reason) {
+        if (subToken !== subExtractToken) return;
+        diag('subtitle-remote-fallback', { reason: String(reason) });
+        closeReader();
+        window.AndroidAudioTasks.request('network_subtitle', {
+          videoPath: currentVideoPath,
+          trackIndex: ordinalIndex,
+          session: session,
+        }, { timeoutMs: 900000 }).then(function (got) {
           if (subToken !== subExtractToken) return;
           if (normPath(currentVideoPath) !== want) return;
-          mountSubtitleText(text, item, silent);
+          var path = got && got.path;
+          if (!path) { settle(''); return; }
+          return invoke('read_text', { path: path }).then(function (text) { settle(text); });
+        }).catch(function (error) {
+          if (subToken !== subExtractToken) return;
+          clearSubPill(); transcodeVideo = ''; pendingSub = null;
+          toast('字幕抽取未能启动：' + error, 8000);
         });
-      }).catch(function (error) {
-        if (subToken !== subExtractToken) return;
-        clearSubPill(); transcodeVideo = ''; pendingSub = null;
-        toast('字幕抽取未能启动：' + error, 8000);
-      });
+      }
+      window.AndroidAudioTasks.request('subtitle_reader', { videoPath: currentVideoPath, session: session }, { timeoutMs: 30000 })
+        .then(function (reader) {
+          if (subToken !== subExtractToken) return;
+          if (!reader || !reader.url) { fallback('读取器未就绪'); return; }
+          readerId = reader.readerId;
+          return invoke('extract_subtitle_text_url', {
+            url: reader.url, size: reader.size, subs: batch, durationUs: probeDurationUs || null
+          }).then(function (got) {
+            closeReader();
+            var hit = (got || []).filter(function (x) { return x.index === ordinalIndex; })[0];
+            if (!hit) { fallback('稀疏抽取没有结果'); return; }
+            settle(hit.text);
+          });
+        })
+        .catch(function (error) { fallback(error); });
     }
 
     function mountSubtitleText(text, item, silent) {
@@ -2953,9 +3073,9 @@
         var pair = await invoke('pair_danmaku', { videoPath: pairPath });
         if (!ownsSidecar(danOwner, 'danmaku') || danmakuManual) return;
         if (pair) {
-          await desktopLoadDanmaku(pair.name, String(pair.text).replace(/^\uFEFF/, ''), danOwner);
-          // 同名配对只有一个结果（xml 优先于 json），文件名没有辨识价值，不往提示里塞长片名
-          if (!window.AndroidPlayback) toast('已自动加载同名弹幕');
+          // 同名配对只有一个结果（xml 优先于 json），文件名没有辨识价值；
+          // 「自动加载」和「装载条数」并成一条，别再各弹一次。
+          await desktopLoadDanmaku(pair.name, String(pair.text).replace(/^\uFEFF/, ''), danOwner, true);
         } else {
           clearDanmaku();
           // 用户刚打开的就是这部片，提示里再写一遍长片名只会把 toast 撑成两三行

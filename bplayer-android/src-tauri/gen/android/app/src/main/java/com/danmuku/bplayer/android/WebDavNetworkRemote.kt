@@ -209,7 +209,7 @@ internal class WebDavNetworkRemote(private val source: NetworkSource) : NetworkR
     return RemoteStat(if (item.directory) "dir" else "file", item.size, item.modifiedMs)
   }
 
-  override fun open(relative: String, start: Long, length: Long, total: Long): InputStream {
+  override fun open(relative: String, start: Long, length: Long, total: Long, prefetchBytes: Int): InputStream {
     val end = start + length - 1
     val request = builder(url(relative)).header("Range", "bytes=$start-$end").get().build()
     val response = streamingClient.newCall(request).execute()

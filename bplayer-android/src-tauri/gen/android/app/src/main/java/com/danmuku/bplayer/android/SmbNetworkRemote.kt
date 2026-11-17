@@ -165,10 +165,10 @@ internal class SmbNetworkRemote(private val source: NetworkSource, cancellation:
   }
 
   @Synchronized
-  override fun open(relative: String, start: Long, length: Long, total: Long): InputStream {
+  override fun open(relative: String, start: Long, length: Long, total: Long, prefetchBytes: Int): InputStream {
     val file = mediaHandle(relative, total)
     return java.io.BufferedInputStream(PositionedNetworkStream(start, length,
-      { position, buffer, offset, count -> file.read(buffer, position, offset, count) }, { /* 句柄由 mediaHandle 复用，不在每个流结束时关闭 */ }), 256 * 1024)
+      { position, buffer, offset, count -> file.read(buffer, position, offset, count) }, { /* 句柄由 mediaHandle 复用，不在每个流结束时关闭 */ }, prefetchBytes), 256 * 1024)
   }
 
   @Synchronized

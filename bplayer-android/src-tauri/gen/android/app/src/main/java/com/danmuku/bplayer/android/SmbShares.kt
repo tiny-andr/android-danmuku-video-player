@@ -54,9 +54,9 @@ internal class SmbServerNetworkRemote(
     RemoteStat("dir", 0)
   } else withShare(relative) { _, path, remote -> remote.stat(path) }
 
-  override fun open(relative: String, start: Long, length: Long, total: Long): InputStream =
+  override fun open(relative: String, start: Long, length: Long, total: Long, prefetchBytes: Int): InputStream =
     withShare(relative) { bound, path, remote ->
-      connections.watch(bound, role, remote, remote.open(path, start, length, total))
+      connections.watch(bound, role, remote, remote.open(path, start, length, total, prefetchBytes))
     }
 
   override fun readAtExact(relative: String, position: Long, buffer: ByteArray, offset: Int, length: Int, total: Long): Int =

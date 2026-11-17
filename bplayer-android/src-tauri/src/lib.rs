@@ -22,6 +22,7 @@ fn read_sidecar(path: &Path) -> Result<Vec<u8>, String> {
 }
 
 mod blocking;
+mod http_range;
 mod mkv_probe;
 mod mkv_sub;
 mod pgs_render;
@@ -475,6 +476,42 @@ fn transcode_audio_cancel() -> Result<bool, String> {
     Ok(false)
 }
 
+/// 网络源的内嵌字幕抽取。
+///
+/// 和本地版共用 `mkv_sub` 的稀疏解析（按 Cues 只读字幕块），区别只在字节来源：
+/// 网络源在 Android 上没有可挂载路径，这里走本机媒体代理的 HTTP Range。
+/// 不这么做就只能让 ffmpeg 顺序读整片（实测 7.5 GB 的片要四十分钟），
+/// 与桌面版"几秒抽完"完全不是一个量级。
+#[tauri::command]
+async fn extract_subtitle_text_url(
+    url: String,
+    size: u64,
+    subs: Vec<mkv_sub::SubTrack>,
+    duration_us: Option<u64>,
+) -> Result<serde_json::Value, String> {
+    blocking(move || {
+        let _ = duration_us;
+        if size == 0 {
+            return Err("远端文件为空，无法抽取字幕".to_string());
+        }
+        let mut reader = http_range::HttpRangeReader::new(url, size);
+        let mut ready: Vec<SubText> = Vec::new();
+        let mut failed: Vec<String> = Vec::new();
+        for sub in subs {
+            match mkv_sub::sparse_extract_srt_reader(&mut reader, sub.track, sub.ass) {
+                Ok(srt) if !srt.trim().is_empty() => ready.push(SubText { index: sub.index, text: srt }),
+                Ok(_) => failed.push(format!("轨 {}: 解析结果为空", sub.track)),
+                Err(error) => failed.push(format!("轨 {}: {error}", sub.track)),
+            }
+        }
+        if ready.is_empty() && !failed.is_empty() {
+            return Err(format!("内嵌字幕无法稀疏抽取：{}", failed.join("；")));
+        }
+        serde_json::to_value(ready).map_err(|error| error.to_string())
+    })
+    .await?
+}
+
 /// 旧桌面版清理半成品缓存的入口，Android 上是**有意的空实现**。
 ///
 /// 前端 `index.html` 换片时仍会 `invoke('clean_sidecar_tmp', …)`，所以保留注册；
@@ -535,6 +572,7 @@ pub fn run() {
             transcode_target,
             transcode_audio_start,
             extract_subtitle_text,
+            extract_subtitle_text_url,
             transcode_audio_cancel,
             clean_sidecar_tmp,
             pgs_open,

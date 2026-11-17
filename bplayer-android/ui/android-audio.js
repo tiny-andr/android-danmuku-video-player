@@ -95,9 +95,10 @@
   function codec(value) {
     var name = String(value || "").toUpperCase();
     var dead = name.indexOf("A_DTS") === 0 || ["DTS", "DCA", "TRUEHD", "A_TRUEHD", "PCM_BLURAY", "A_PCM/BLURAY", "AC4", "AC-4", "A_AC4", "A_DRA", "DRA"].includes(name);
-    var unreliable = ["A_AC3", "AC3", "AC-3", "A_EAC3", "EAC3", "E-AC-3"].includes(name);
     var native = NATIVE_AUDIO.includes(name);
-    return { dead: dead, unreliable: unreliable, native: native, needsConversion: !native };
+    // 这里曾经还有一个 unreliable 字段（AC-3/E-AC-3），但没有任何地方消费它；
+    // 「解码不可靠、可能无声」那条提示已按用户要求去掉，字段一并删掉免得误导。
+    return { dead: dead, native: native, needsConversion: !native };
   }
 
   function createSession(tasks, hooks) {

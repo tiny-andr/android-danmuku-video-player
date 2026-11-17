@@ -77,7 +77,7 @@
     var name = node("div"); name.id = "mResumeName";
     var position = node("div"); position.id = "mResumePosition";
     var choices = node("div"); choices.id = "mResumeActions";
-    choices.appendChild(button("从头播放", "mResumeRestart", function () { chooseResume(false); }));
+    // 想从头播直接把进度拖到 0 就行，单独给个按钮只是多一个误点入口。
     choices.appendChild(button("继续播放", "mResumeContinue", function () { chooseResume(true); }));
     choices.appendChild(button("取消", "mResumeCancel", function () {
       stopResumeCountdown(); // 点任何按钮都立刻停表，不能再在用户离开后被自动继续

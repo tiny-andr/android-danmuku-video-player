@@ -133,7 +133,7 @@ fn read_timestamp_scale(head: &[u8], seg_data: usize) -> Option<u64> {
 /// TimestampScale 必须读到：所有时间戳换算成毫秒都靠它。只读前 2 MB 就够不到 Info 的片子
 /// （4K 片首簇常超 2 MB）以前静默按 1e6 猜，实际值非 1e6 时整条时间轴按比例错位，
 /// 产出却是一份看起来正常的 SRT —— 所以读不到就返回 Err 让调用方跳过该轨。
-fn locate_cues(f: &mut File) -> Result<(u64, u64, u64), String> {
+fn locate_cues<R: Read + Seek>(f: &mut R) -> Result<(u64, u64, u64), String> {
     let mut head = vec![0u8; 2 * 1024 * 1024];
     f.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
     let n = f.read(&mut head).map_err(|e| e.to_string())?;
@@ -184,7 +184,7 @@ struct CuePoint {
     time: u64,
 }
 
-fn read_cues(f: &mut File, cues_pos: u64, track: u32) -> Result<Vec<CuePoint>, String> {
+fn read_cues<R: Read + Seek>(f: &mut R, cues_pos: u64, track: u32) -> Result<Vec<CuePoint>, String> {
     // 先读元素头确认长度，再一次读进来（Cues 常在几 MB 内）
     let mut head = [0u8; 64];
     f.seek(SeekFrom::Start(cues_pos)).map_err(|e| e.to_string())?;
@@ -381,11 +381,24 @@ pub fn strip_markup(srt: &str) -> String {
 /// "跳过这条轨"，判据本身一处都不能省。）
 pub fn sparse_extract_srt(path: &Path, track_number: u32, is_ass: bool) -> Result<String, String> {
     let mut f = File::open(path).map_err(|e| e.to_string())?;
-    let (cues_pos, seg_data, timestamp_scale) = locate_cues(&mut f)?;
+    sparse_extract_srt_reader(&mut f, track_number, is_ass)
+}
+
+/// 同一套稀疏抽取，读取源换成任意 `Read + Seek`。
+///
+/// 网络源（SMB / WebDAV / SFTP）在 Android 上没有可挂载的路径，桌面版那种"直接给个
+/// 文件路径"走不通：这里让调用方提供按字节随机读的实现（见 `http_range`），
+/// 解析逻辑与本地文件完全相同。
+pub fn sparse_extract_srt_reader<R: Read + Seek>(
+    f: &mut R,
+    track_number: u32,
+    is_ass: bool,
+) -> Result<String, String> {
+    let (cues_pos, seg_data, timestamp_scale) = locate_cues(f)?;
     if timestamp_scale != 1_000_000 {
         return Err(format!("TimestampScale={timestamp_scale}，非 1ms 时间基，放弃该轨"));
     }
-    let cues = read_cues(&mut f, cues_pos, track_number)?;
+    let cues = read_cues(f, cues_pos, track_number)?;
     if cues.is_empty() {
         return Err("Cues 里没有这条字幕轨".into());
     }
