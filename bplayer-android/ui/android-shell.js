@@ -222,7 +222,24 @@
     if (window.console && console.warn) console.warn(message);
   }
 
+  // 文件浏览直接读文件路径，必须先拿到「所有文件访问权限」。这个权限没有运行时
+  // 授权弹窗（特殊应用访问权限），新装应用默认是关闭的；没权限时打开浏览器只会得到
+  // 一个空白目录，看起来像软件坏了。所以打开前先问原生：没授权就引导系统设置页，
+  // 并让这次选择直接结束（等同于用户取消），用户授权回来再点一次即可。
+  function storageAccessDenied() {
+    var ui = window.AndroidUI;
+    if (!ui || typeof ui.hasAllFilesAccess !== "function") return false;
+    try {
+      if (ui.hasAllFilesAccess()) return false;
+      if (ui.requestAllFilesAccess) ui.requestAllFilesAccess();
+      return true;
+    } catch (error) {
+      return false;
+    }
+  }
+
   function openBrowser(m) {
+    if (storageAccessDenied()) return Promise.resolve(null);
     navigation.invalidate();
     return window.AndroidFiles.open(m);
   }

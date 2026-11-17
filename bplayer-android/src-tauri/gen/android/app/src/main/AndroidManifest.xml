@@ -16,11 +16,16 @@
     <!-- AndroidTV support -->
     <uses-feature android:name="android.software.leanback" android:required="false" />
 
+    <!-- appCategory=game 让本应用命中 Android 16+ 大屏方向限制的官方豁免名单：
+         sw>=600dp 的设备/窗口（折叠机展开内屏、平板）会忽略 setRequestedOrientation，
+         播放页的横/竖屏按钮随之完全失效；Android 17 已移除该规则的 opt-out，
+         只剩 appCategory=game 这一条路能把方向控制权还给用户。 -->
     <application
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:theme="@style/Theme.bplayer_android"
         android:networkSecurityConfig="@xml/network_security_config"
+        android:appCategory="game"
         android:usesCleartextTraffic="${usesCleartextTraffic}">
         <activity
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode"

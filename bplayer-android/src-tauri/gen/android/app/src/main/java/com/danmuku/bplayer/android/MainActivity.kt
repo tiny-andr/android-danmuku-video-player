@@ -1,13 +1,17 @@
 package com.danmuku.bplayer.android
 
+import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.content.Context
 import android.database.ContentObserver
 import android.media.AudioManager
+import android.net.Uri
+import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
+import android.widget.Toast
 import org.json.JSONObject
 import android.os.Build
 import android.os.Bundle
@@ -41,14 +45,52 @@ class MainActivity : TauriActivity() {
 
   private fun applyPlaybackOrientation() {
     val autoRotate = Settings.System.getInt(contentResolver, Settings.System.ACCELEROMETER_ROTATION, 0) != 0
+    // 大屏（折叠机展开内屏、平板）上 USER_LANDSCAPE / USER_PORTRAIT 依旧不生效，
+    // 只有显式 LANDSCAPE / PORTRAIT 能把视频按比例铺满；小屏保持跟随传感器的
+    // user 系列，避免手机被硬锁方向。
+    val largeScreen = resources.configuration.smallestScreenWidthDp >= 600
     requestedOrientation = when {
       playbackShape == "home" -> ActivityInfo.SCREEN_ORIENTATION_USER
       playbackOrientationOverride == "landscape" -> ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
       playbackOrientationOverride == "portrait" -> ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
       !autoRotate -> ActivityInfo.SCREEN_ORIENTATION_LOCKED
-      playbackShape == "landscape" -> ActivityInfo.SCREEN_ORIENTATION_USER_LANDSCAPE
-      playbackShape == "portrait" -> ActivityInfo.SCREEN_ORIENTATION_USER_PORTRAIT
+      playbackShape == "landscape" ->
+        if (largeScreen) ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE else ActivityInfo.SCREEN_ORIENTATION_USER_LANDSCAPE
+      playbackShape == "portrait" ->
+        if (largeScreen) ActivityInfo.SCREEN_ORIENTATION_PORTRAIT else ActivityInfo.SCREEN_ORIENTATION_USER_PORTRAIT
       else -> ActivityInfo.SCREEN_ORIENTATION_USER
+    }
+  }
+
+  // 文件浏览和播放都直接走文件路径，依赖「所有文件访问权限」。这个权限是特殊的
+  // 应用访问权限（MANAGE_EXTERNAL_STORAGE），没有运行时授权弹窗：新装应用默认关闭，
+  // 只能由用户在系统设置页里手动打开。所以必须在打开浏览器前主动检测并引导，
+  // 否则新用户看到的是一个空白目录，会以为软件坏了。
+  private fun storageAccessGranted(): Boolean =
+    if (Build.VERSION.SDK_INT >= 30) {
+      Environment.isExternalStorageManager()
+    } else {
+      checkSelfPermission(android.Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+    }
+
+  private fun requestStorageAccess() {
+    Toast.makeText(this, "请允许「所有文件访问权限」，返回本应用后再次点击即可浏览", Toast.LENGTH_LONG).show()
+    val packageUri = Uri.fromParts("package", packageName, null)
+    val primary = if (Build.VERSION.SDK_INT >= 30) {
+      Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, packageUri)
+    } else {
+      Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, packageUri)
+    }
+    try {
+      startActivity(primary)
+    } catch (error: Exception) {
+      // 少数机型没有应用专属页，退到全量列表页，再不济交给应用详情。
+      runCatching { startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)) }
+        .onFailure {
+          runCatching {
+            startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, packageUri))
+          }
+        }
     }
   }
 
@@ -211,6 +253,14 @@ class MainActivity : TauriActivity() {
         val max = audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
         val min = if (Build.VERSION.SDK_INT >= 28) audio.getStreamMinVolume(AudioManager.STREAM_MUSIC) else 0
         runCatching { audio.setStreamVolume(AudioManager.STREAM_MUSIC, index.coerceIn(min, max), 0) }
+      }
+
+      @JavascriptInterface
+      fun hasAllFilesAccess(): Boolean = storageAccessGranted()
+
+      @JavascriptInterface
+      fun requestAllFilesAccess() {
+        runOnUiThread { requestStorageAccess() }
       }
     }, "AndroidUI")
   }
