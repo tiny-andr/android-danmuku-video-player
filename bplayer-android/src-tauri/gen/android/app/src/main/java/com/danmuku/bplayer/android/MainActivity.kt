@@ -262,6 +262,10 @@ class MainActivity : TauriActivity() {
       fun requestAllFilesAccess() {
         runOnUiThread { requestStorageAccess() }
       }
+
+      // 首页要在界面上标出这是调试包，不然 debug 和正式包装在一起时分不清。
+      @JavascriptInterface
+      fun buildKind(): String = if (BuildConfig.DEBUG) "debug" else "release"
     }, "AndroidUI")
   }
 

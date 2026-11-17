@@ -28,6 +28,12 @@ internal object AudioWorkerProtocol {
   const val PROBE = 1
   const val CONVERT = 2
   const val CANCEL = 3
+
+  /**
+   * 网络视频的内嵌字幕抽取：输入是 media proxy 的 http URL，跑一次 `-map 0:s:N -f srt`。
+   * 不走 Job/转码流程（没有进度、不写视频同目录），结果是一个 cacheDir 里的 srt 文件路径。
+   */
+  const val EXTRACT_SUBTITLE = 4
   const val PROGRESS = 10
   const val DONE = 11
   const val ERROR = 12
@@ -219,6 +225,7 @@ class AudioDecodeService : Service() {
   private val messenger = Messenger(Handler(Looper.getMainLooper()) { message ->
     when (message.what) {
       AudioWorkerProtocol.PROBE, AudioWorkerProtocol.CONVERT -> start(message)
+      AudioWorkerProtocol.EXTRACT_SUBTITLE -> extractSubtitle(message)
       AudioWorkerProtocol.CANCEL -> active?.takeIf { it.id == message.data.getString("jobId") }?.let { cancel(it) }
     }
     true
@@ -226,6 +233,15 @@ class AudioDecodeService : Service() {
 
   override fun onCreate() {
     super.onCreate()
+    // Extracted subtitles are throwaway; drop stale ones so the cache cannot grow forever.
+    runCatching {
+      File(cacheDir, "subtitles").listFiles()?.forEach { file ->
+        if (file.isFile && file.name.endsWith(".srt") &&
+          System.currentTimeMillis() - file.lastModified() > 24L * 60 * 60 * 1000) {
+          runCatching { file.delete() }
+        }
+      }
+    }
     val staging = File(cacheDir, "audio-transcode").canonicalFile
     val parent = cacheDir.canonicalFile
     val identifier = Regex("[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}")
@@ -682,8 +698,53 @@ class AudioDecodeService : Service() {
     } else job.terminalMessage?.let { send(job.client, AudioWorkerProtocol.ERROR, job.id, it) }
   }
 
+  private fun extractSubtitle(message: Message) {
+    val client = message.replyTo ?: return
+    val data = message.data
+    val id = data.getString("jobId") ?: return
+    val input = data.getString("input") ?: ""
+    val index = data.getInt("subtitleIndex", -1)
+    val output = File(data.getString("output") ?: "")
+    if (input.isEmpty() || index !in 0..63) {
+      send(client, AudioWorkerProtocol.ERROR, id, "字幕抽取参数无效"); return
+    }
+    val root = File(cacheDir, "subtitles")
+    runCatching { root.mkdirs() }
+    if (output.canonicalFile.parentFile != root.canonicalFile) {
+      send(client, AudioWorkerProtocol.ERROR, id, "字幕输出位置无效"); return
+    }
+    runCatching { output.delete() }
+    // Converting the subtitle stream to subrip keeps ASS/SSA tracks readable by the
+    // web layer, which only understands plain timed text. Bitmap (PGS) tracks cannot be
+    // converted to text at all, so they are remuxed into a tiny local MKV that the Rust
+    // PGS renderer already knows how to read.
+    val format = if (data.getString("format") == "mkv") "mkv" else "srt"
+    val args = if (format == "mkv") {
+      arrayOf("-v", "error", "-y", "-i", input, "-map", "0:s:$index", "-c", "copy", "-f", "matroska", output.absolutePath)
+    } else {
+      arrayOf("-v", "error", "-y", "-i", input, "-map", "0:s:$index", "-c:s", "srt", "-f", "srt", output.absolutePath)
+    }
+    FFmpegKit.executeWithArgumentsAsync(args) { session ->
+      if (ReturnCode.isSuccess(session.returnCode) && output.isFile && output.length() > 0) {
+        sendResult(client, id, JSONObject().put("path", output.absolutePath).put("size", output.length()).toString())
+      } else {
+        val reason = session.output?.trim()?.take(200)?.ifEmpty { null } ?: "输出为空"
+        runCatching { output.delete() }
+        send(client, AudioWorkerProtocol.ERROR, id, "字幕抽取失败：$reason")
+      }
+    }
+  }
+
   private fun send(client: Messenger, type: Int, id: String, message: String) {
     runCatching { client.send(Message.obtain(null, type).apply { data = Bundle().apply { putString("jobId", id); putString("message", message) } }) }
+  }
+
+  private fun sendResult(client: Messenger, id: String, result: String) {
+    runCatching {
+      client.send(Message.obtain(null, AudioWorkerProtocol.DONE).apply {
+        data = Bundle().apply { putString("jobId", id); putString("result", result) }
+      })
+    }
   }
 
   override fun onDestroy() {

@@ -108,6 +108,12 @@
       "#mTop .mIconBtn:active{background:rgba(255,255,255,.26);}" +
       "#mBack{font-size:27px;font-weight:300;line-height:38px;}" +
       "#mTop #mRotateBtn{width:auto;min-width:58px;padding:0 10px;border-radius:13px;font-size:12px;line-height:normal;}" +
+      ".mDebugTag{display:inline-block;margin-left:8px;padding:1px 6px;border-radius:6px;background:#ff5d7a;color:#fff;font:600 11px/1.6 system-ui,sans-serif;letter-spacing:.06em;vertical-align:middle;font-style:normal;}" +
+      // display 会压过 hidden 属性，必须显式压回来，否则正式包也会顶着 DEBUG 徽标。
+      ".mDebugTag[hidden]{display:none!important;}" +
+      ".mPermBanner{display:flex;flex-direction:column;gap:3px;width:100%;margin-top:14px;padding:12px 14px;border-radius:14px;border:1px solid #ffc35a66;background:#ffc35a14;color:#ffd489;text-align:left;font:inherit;cursor:pointer;}" +
+      ".mPermBanner b{font-size:14px;font-weight:600;}.mPermBanner small{font-size:12px;opacity:.85;}" +
+      ".mPermBanner[hidden]{display:none!important;}" +
       "#mInfoBtn{font-size:16px;font-family:Georgia,serif;font-style:italic;}" +
       ".mTitleBox{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px;}" +
       "#mTitle{font-size:14px;font-weight:600;color:#fff;overflow:hidden;text-overflow:ellipsis;" +
@@ -457,7 +463,7 @@
         '<div class="mLeft">' +
           '<div class="mBrand"><div class="mLogo">▶</div>' +
             // 版本占位：Android 没有窗口标题，版本挂在首页副标题后；具体值由 renderAppVersion() 填
-            '<div><h1>Bplayer</h1><p>本地视频 · 弹幕播放器<span id="mAppVersion"> · 版本 —</span></p></div>' +
+            '<div><h1>Bplayer<i class="mDebugTag" id="mDebugTag" hidden>DEBUG</i></h1><p>本地视频 · 弹幕播放器<span id="mAppVersion"> · 版本 —</span></p></div>' +
             '<button type="button" class="mHomeGear" id="mHomeSettings" title="设置">⚙</button></div>' +
           '<div class="mActions">' +
             '<button type="button" id="mOpenVideo" class="mBtn mPrimary">' +
@@ -467,6 +473,8 @@
           '</div>' +
           '<button type="button" id="mOpenNetwork" class="mBtn mSecondary">' +
             '<b>网络存储</b><small>SMB / WebDAV / SFTP · 连接 NAS 与服务器</small></button>' +
+          '<button type="button" id="mPermBanner" class="mPermBanner" hidden>' +
+            '<b>需要「所有文件访问权限」</b><small>没有它读不到本地视频 · 点此去授权</small></button>' +
           '<p class="mHint">本地与网络视频 · 同名弹幕与外挂字幕自动加载</p>' +
         '</div>' +
         '<div class="mRight">' +
@@ -540,8 +548,49 @@
     if (!node) return false;
     var text = appVersionSeen || normalizeAppVersion(window.__BplayerAppVersion);
     // 已知：· v0.1.0；未知：· 版本 —（继承副标题的小字颜色，不额外抢眼）
-    node.textContent = text ? " · v" + text : " · 版本 —";
+    // debug 包额外标出来：两个包共存时首页必须能一眼分辨。
+    var tag = document.getElementById("mDebugTag");
+    var isDebug = buildKind() === "debug";
+    if (tag) tag.hidden = !isDebug;
+    node.textContent = (text ? " · v" + text : " · 版本 —") + (isDebug ? " · debug" : "");
     return true;
+  }
+
+  // 构建类型由原生桥提供（BuildConfig.DEBUG）；拿不到就当作正式包。
+  function buildKind() {
+    try {
+      if (window.AndroidUI && window.AndroidUI.buildKind) return String(window.AndroidUI.buildKind());
+    } catch (error) {}
+    return "";
+  }
+
+  // 没拿到「所有文件访问权限」时，首页必须自己说出来：用户点开应用就该知道要先授权，
+  // 而不是等点了「选择视频」才发现。桥不可用（比如桌面版）一律当已授权，不打扰。
+  function storageGranted() {
+    try {
+      if (window.AndroidUI && window.AndroidUI.hasAllFilesAccess) return !!window.AndroidUI.hasAllFilesAccess();
+    } catch (error) {}
+    return true;
+  }
+
+  function refreshStorageBanner() {
+    var banner = document.getElementById("mPermBanner");
+    if (banner) banner.hidden = storageGranted();
+  }
+
+  function bindStorageBanner() {
+    var banner = document.getElementById("mPermBanner");
+    if (!banner) return;
+    banner.addEventListener("click", function () {
+      try {
+        if (window.AndroidUI && window.AndroidUI.requestAllFilesAccess) window.AndroidUI.requestAllFilesAccess();
+      } catch (error) {}
+    });
+    // 从系统授权页返回时重新检查：授权成功就把提示条收起来。
+    document.addEventListener("visibilitychange", function () {
+      if (!document.hidden) setTimeout(refreshStorageBanner, 150);
+    });
+    refreshStorageBanner();
   }
 
   function bindAppVersion() {
@@ -1041,6 +1090,7 @@
   function boot() {
     buildHome();
     bindAppVersion(); // 首页已构建：先按全局值渲染一次，再监听后续到达的版本事件
+    bindStorageBanner(); // 没权限时首页直接显示授权入口
     buildTopbar();
     ["audioPanel", "subtitlePanel", "danmakuPanel", "densityPanel", "blockPanel", "settingsMask"].forEach(function (id) {
       navigation.register(id, function () { document.getElementById(id).hidden = false; }, function () { document.getElementById(id).hidden = true; });

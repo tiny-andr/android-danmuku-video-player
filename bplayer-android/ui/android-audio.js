@@ -73,11 +73,17 @@
     };
   }
 
+  // 内核确定能直接播的音频编码白名单。这里以前是黑名单（只列出 DTS/TrueHD/AC3 这类），
+  // 名单外的冷门编码（mp2/ALAC/APE/WMA…）会被当成「可播」——结果就是不转码但没声音。
+  // 改成白名单后，拿不准的一律走转换：最差多转一次，不会静音。
+  // AC-3 实测内核能直接解码，所以放进白名单；E-AC-3 没有验证过，继续按需要转换处理。
+  var NATIVE_AUDIO = ["A_AAC", "AAC", "A_MPEG/L3", "MP3", "A_OPUS", "OPUS", "A_VORBIS", "VORBIS", "A_FLAC", "FLAC", "A_AC3", "AC3", "AC-3"];
   function codec(value) {
     var name = String(value || "").toUpperCase();
     var dead = name.indexOf("A_DTS") === 0 || ["DTS", "DCA", "TRUEHD", "A_TRUEHD", "PCM_BLURAY", "A_PCM/BLURAY", "AC4", "AC-4", "A_AC4", "A_DRA", "DRA"].includes(name);
     var unreliable = ["A_AC3", "AC3", "AC-3", "A_EAC3", "EAC3", "E-AC-3"].includes(name);
-    return { dead: dead, unreliable: unreliable, needsConversion: dead || unreliable };
+    var native = NATIVE_AUDIO.includes(name);
+    return { dead: dead, unreliable: unreliable, native: native, needsConversion: !native };
   }
 
   function createSession(tasks, hooks) {

@@ -1,4 +1,4 @@
 <resources>
-    <string name="app_name">"Bplayer Android"</string>
-    <string name="main_activity_title">"Bplayer Android"</string>
+    <string name="app_name">Bplayer</string>
+    <string name="main_activity_title">Bplayer</string>
 </resources>

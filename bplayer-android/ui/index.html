@@ -1960,6 +1960,20 @@
 
     function switchAudioTrack(i) {
       if (!probeTracks || !probeTracks[i] || !currentVideoPath || !window.AndroidPlayback.active) return;
+      var track = probeTracks[i];
+      // 内核播放视频时用的是默认音轨；容器没有 default 标记时按第 0 条算（与开片探测一致）。
+      // 这条轨本身就是可播编码（AAC）时，视频自带的音频就是它，既不需要提取也不需要转码。
+      var defaultIndex = probeTracks.findIndex(function (t) { return !!t.default; });
+      if (defaultIndex < 0) defaultIndex = 0;
+      if (i === defaultIndex && !window.AndroidAudioSession.codec(track.codec).needsConversion) {
+        if (audioSession) audioSession.reset();
+        releaseVideoAudio();
+        externalOrdinal = -1;
+        clearAudioPill();
+        refreshAudioMenu();
+        audioStatus('音轨' + (i + 1) + ' 就是视频内置音轨，无需处理。', false);
+        return;
+      }
       if (externalOrdinal === i + 1) return;
       ensureAudioSession().select(i, true);
     }
@@ -2081,6 +2095,9 @@
       if (s.kind === 'bitmap') { mountPgsSubtitle(s, silent); return; }
       unmountPgs(); // 从位图字幕切到文本字幕：收起图像层
       if (s.kind === 'ext') return loadSubtitlePath(s.path, silent);
+      // Network videos cannot use the Rust extractor (it needs a real file path), so the
+      // ffmpeg worker pulls the track through the media proxy instead.
+      if (String(currentVideoPath).indexOf('/@network/') === 0) return extractNetworkSubtitle(s, silent);
       // 内嵌：整条链走内存，不产生缓存文件
       // 归属令牌必须在 invoke 之前取：回包里再读 currentVideoPath 等于拿它跟自己比，
       // 恒真且无效，换片后上一部的字幕照样能挂到新片上（桌面版修过同款 bug）。
@@ -2114,6 +2131,39 @@
         transcodeVideo = '';
         pendingSub = null;
         toast('字幕抽取未能启动：' + e, 8000);
+      });
+    }
+
+    // 网络视频的内嵌文本字幕：Rust 提取器只认本地路径，改由 ffmpeg worker 经媒体代理把
+    // 字幕轨转成 srt 落到 cache，再读回内存挂载。取消/换片语义与本地链路一致：token 变了
+    // 或换了片，回包直接作废。
+    function extractNetworkSubtitle(item, silent) {
+      if (!window.AndroidAudioTasks || !window.AndroidAudioTasks.request) { toast('字幕抽取桥未就绪', 8000); return; }
+      var want = normPath(currentVideoPath);
+      var subToken = ++subExtractToken;
+      pendingSub = item;
+      transcodeVideo = currentVideoPath;
+      transcodeOrdinal = -1;
+      updateSubPill('extract');
+      window.AndroidAudioTasks.request('network_subtitle', {
+        videoPath: currentVideoPath,
+        trackIndex: Math.max(0, (item.ordinal || 1) - 1),
+        session: window.AndroidAudioTasks.currentSession,
+      }, { timeoutMs: 900000 }).then(function (got) {
+        if (subToken !== subExtractToken) return;
+        if (normPath(currentVideoPath) !== want) return;
+        pendingSub = null; clearSubPill(); transcodeVideo = ''; transcodeOrdinal = -1;
+        var path = got && got.path;
+        if (!path) { toast('这条内嵌字幕抽不出来', 8000); return; }
+        return invoke('read_text', { path: path }).then(function (text) {
+          if (subToken !== subExtractToken) return;
+          if (normPath(currentVideoPath) !== want) return;
+          mountSubtitleText(text, item, silent);
+        });
+      }).catch(function (error) {
+        if (subToken !== subExtractToken) return;
+        clearSubPill(); transcodeVideo = ''; pendingSub = null;
+        toast('字幕抽取未能启动：' + error, 8000);
       });
     }
 
@@ -2304,7 +2354,23 @@
       var path = currentVideoPath;
       updateSubPill('pgs');
       toast('正在解析位图字幕（' + clipName(s.name) + '）…', 4000);
-      invoke('pgs_open', { videoPath: path, track: s.track }).then(function (idx) {
+      // 网络视频的位图轨：Rust 只认本地文件，先用 worker 把该轨原样复制成 cache 里的单轨
+      // mkv，再交给现有的 PGS 渲染链路（单轨 mkv 的字幕轨号就是 1）。
+      var isNetworkPgs = String(path).indexOf('/@network/') === 0;
+      var pgsSource = isNetworkPgs && window.AndroidAudioTasks && window.AndroidAudioTasks.request
+        ? window.AndroidAudioTasks.request('network_subtitle', {
+            videoPath: path,
+            trackIndex: Math.max(0, (s.ordinal || 1) - 1),
+            format: 'mkv',
+            session: window.AndroidAudioTasks.currentSession,
+          }, { timeoutMs: 900000 }).then(function (got) {
+            if (!got || !got.path) throw new Error('位图轨抽取失败');
+            return { videoPath: got.path, track: 1 };
+          })
+        : Promise.resolve({ videoPath: path, track: s.track });
+      pgsSource.then(function (target) {
+        return invoke('pgs_open', { videoPath: target.videoPath, track: target.track });
+      }).then(function (idx) {
         if (token !== pgsToken) return;
         clearSubPill();   // 只收字幕那颗：音轨转码可能还在跑
         if (!idx || !idx.events || !idx.events.length) { toast('这条字幕轨里没有可显示的位图', 6000); return; }

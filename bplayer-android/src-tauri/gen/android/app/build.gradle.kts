@@ -20,6 +20,7 @@ android {
     namespace = "com.danmuku.bplayer.android"
     defaultConfig {
         manifestPlaceholders["usesCleartextTraffic"] = "false"
+        manifestPlaceholders["appName"] = "Bplayer"
         applicationId = "com.danmuku.bplayer.android"
         minSdk = 26
         targetSdk = 37
@@ -44,6 +45,10 @@ android {
     }
     buildTypes {
         getByName("debug") {
+            // Debug and release must be installable side by side: separate application ids keep
+            // their data directories and update tracks apart, and the launcher label tells them
+            // apart. Providers and authorities follow applicationId automatically.
+            manifestPlaceholders["appName"] = "Bplayer debug"
             manifestPlaceholders["usesCleartextTraffic"] = "true"
             isDebuggable = true
             isJniDebuggable = true
@@ -120,3 +125,10 @@ dependencies {
 }
 
 apply(from = file("tauri.build.gradle.kts"))
+// The legacy DSL in this project ignores applicationIdSuffix, so set the debug application id
+// through the variant API instead; debug and release then install side by side.
+androidComponents {
+    onVariants(selector().withBuildType("debug")) { variant ->
+        variant.applicationId.set(variant.applicationId.get() + ".debug")
+    }
+}

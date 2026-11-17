@@ -40,7 +40,7 @@ internal class AndroidAudioNative(context: Context, private val webView: WebView
     if (closed || id.length > 256) return
     webView.post {
       if (closed || !trustedPage()) return@post
-      if (argsJson.length > 65536 || command !in setOf("audio_probe", "audio_prepare", "audio_start", "audio_cancel", "audio_cache_files")) {
+      if (argsJson.length > 65536 || command !in setOf("audio_probe", "audio_prepare", "audio_start", "audio_cancel", "audio_cache_files", "network_subtitle")) {
         reply(id, false, "不支持或过大的音轨请求"); return@post
       }
       val args = runCatching { JSONObject(argsJson) }.getOrElse { reply(id, false, "音轨请求格式不正确"); return@post }
@@ -105,6 +105,32 @@ internal class AndroidAudioNative(context: Context, private val webView: WebView
                 AudioSourceAccess(context, args.getString("videoPath"), cancellation).use { source ->
                   reply(id, true, JSONArray(source.cacheFiles()))
                 }
+              }
+              // Embedded subtitles of a network video: the Rust extractor only understands real
+              // file paths, so let the ffmpeg worker pull the track through the media proxy and
+              // hand back a local srt file.
+              "network_subtitle" -> task(session) { jobId, cancellation ->
+                val video = args.getString("videoPath")
+                val index = args.getInt("trackIndex")
+                if (index !in 0..63) throw NetworkFailure("字幕轨序号超出范围")
+                fun run(input: String) {
+                  val format = if (args.optString("format") == "mkv") "mkv" else "srt"
+                  val target = File(File(context.cacheDir, "subtitles").apply { mkdirs() }, "$jobId.$format")
+                  val result = client().call(
+                    AudioWorkerProtocol.EXTRACT_SUBTITLE, jobId,
+                    Bundle().apply {
+                      putString("input", input)
+                      putInt("subtitleIndex", index)
+                      putString("output", target.absolutePath)
+                      putString("format", format)
+                    },
+                    cancellation
+                  )
+                  reply(id, true, result)
+                }
+                // Keep the media proxy alive for the whole extraction: it tears down with the source.
+                val isHttp = video.startsWith("http://") || video.startsWith("https://")
+                if (isHttp) run(video) else AudioSourceAccess(context, video, cancellation).use { run(it.input(video)) }
               }
             }
           } catch (error: Exception) { reply(id, false, safeNetworkError(error)) }
