@@ -1914,7 +1914,7 @@
             subItems.push({ id: 'emb:' + subOrdinal, kind: 'embedded', ordinal: subOrdinal, track: t.number, name: '内嵌 ' + label, codecLabel: codecName(c), type: 'srt', default: !!t.default, lang: t.lang || '' });
           } else if (c.indexOf('S_HDMV/PGS') === 0 && t.number) {
             // PGS 位图字幕：内核画不出来，由 Rust 解出位图、前端覆盖层显示（不转码、不落盘）
-            subItems.push({ id: 'pgs:' + subOrdinal, kind: 'bitmap', ordinal: subOrdinal, track: t.number, name: '内嵌 ' + label, codecLabel: 'PGS', default: !!t.default });
+            subItems.push({ id: 'pgs:' + subOrdinal, kind: 'bitmap', ordinal: subOrdinal, track: t.number, name: '内嵌 ' + label, codecLabel: 'PGS', default: !!t.default, lang: t.lang || '' });
           } else {
             // VobSub 等其他图形字幕：libpgs 只吃 PGS，这里仍标不支持
             subItems.push({ id: 'pgs:' + subOrdinal, kind: 'bitmap', name: '内嵌 ' + label + '（' + codecName(c) + ' 图形字幕，不支持）', disabled: true });
@@ -2262,9 +2262,10 @@
     }
 
     // 自动挂载：外挂（同名 > 变体/语言 > 同目录其它）优先；只有在没有可自动挂载的外挂、
-    // 且设置里开了「自动转换不支持的字幕」时，才自动抽内嵌文本轨（default > 偏好语言 > 首条）。
-    // 外挂与内嵌互斥：pickSubtitle 对两条路径各自排序，先外挂后内嵌，绝不会两个都挂。
-    // 内嵌的 PGS/VobSub 位图不在此列：它们走 pgs_open 的另一条链路，不在「自动转换字幕」语义内。
+    // 且设置里开了「自动转换不支持的字幕」时，才自动挂内嵌轨（default > 偏好语言 > 首条）。
+    // 内嵌里先文本轨（S_TEXT/*，走 ffmpeg 稀疏抽取），没有再退到位图轨（PGS，走 pgs_open 解码）：
+    // 两者都是「核心不支持、需要我们自己处理」的字幕，像《潘神》这种全 PGS 的片子必须能被接住。
+    // 外挂与内嵌互斥：pickSubtitle 对三条路径各自排序，先外挂后内嵌，绝不会两个都挂。
     function autoMountSubtitle() {
       if (subtitleManual || mountedSubId) return;  // 用户手动选过 / 已有外挂自动挂载：不覆盖
       if (pendingSub != null || transcodeVideo) return; // 内嵌抽取已经在跑：别重复提交整批轨
@@ -2274,11 +2275,16 @@
       if (!candidate && appSettings.autoSubtitle === true) {
         candidate = window.AndroidSidecars.pickSubtitle(
           subItems.filter(function (item) { return item.kind === 'embedded'; }), currentVideoName, subtitlePreferences.language);
+        if (!candidate) {
+          candidate = window.AndroidSidecars.pickSubtitle(
+            subItems.filter(function (item) { return item.kind === 'bitmap'; }), currentVideoName, subtitlePreferences.language);
+        }
       }
       if (!candidate) return;
       // scan_subtitles / audio_probe 的回包可能跨过一次换片或退出播放，提交前那一刻再验一次归属
       if (video !== videoLoadToken || path !== currentVideoPath || subtitleManual || mountedSubId) return;
       if (candidate.kind === 'ext') { loadSubtitlePath(candidate.path, true); return; }
+      if (candidate.kind === 'bitmap') { mountPgsSubtitle(candidate, true); return; }
       // silent=true 只表示「这次不是用户手动点的」：beginSidecar 不会置 subtitleManual，
       // 用户之后手动选轨时不会被这条自动挂载反压。字幕胶囊（updateSubPill('extract')）
       // 和抽取失败的 toast 在 mountSubtitle 里都是无条件记账，自动抽取期间同样可见。
