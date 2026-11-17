@@ -22,7 +22,8 @@ internal class AudioWorkerClient(context: Context) : Closeable {
   private val connected = CountDownLatch(1)
   private data class Pending(val latch: CountDownLatch = CountDownLatch(1),
     @Volatile var result: String? = null, @Volatile var error: String? = null,
-    val progress: (Bundle) -> Unit, val assembling: (Bundle) -> Unit = {})
+    val progress: (Bundle) -> Unit, val assembling: (Bundle) -> Unit = {},
+    val started: (Bundle) -> Unit = {})
   private val pending = ConcurrentHashMap<String, Pending>()
   @Volatile private var service: Messenger? = null
   @Volatile private var closed = false
@@ -33,6 +34,7 @@ internal class AudioWorkerClient(context: Context) : Closeable {
     when (message.what) {
       AudioWorkerProtocol.PROGRESS -> request.progress(message.data)
       AudioWorkerProtocol.ASSEMBLING -> request.assembling(message.data)
+      AudioWorkerProtocol.STARTED -> request.started(message.data)
       AudioWorkerProtocol.DONE -> { request.result = message.data.getString("result") ?: "{}"; request.latch.countDown() }
       AudioWorkerProtocol.ERROR -> { request.error = message.data.getString("message") ?: "音轨处理失败"; request.latch.countDown() }
     }
@@ -105,6 +107,47 @@ internal class AudioWorkerClient(context: Context) : Closeable {
   }
 
   val isClosed: Boolean get() = closed
+
+  /**
+   * 启动一路流式转码（[AudioWorkerProtocol.STREAM]）。与 [call] 的区别是**不阻塞**：
+   * 收到 STARTED 立刻返回，之后由一个守护线程等终态，通过 [onFinished] 回报错误或完成。
+   * 流式期间主进程要不停读文件，阻塞在这里会把单线程的执行器堵死。
+   */
+  fun startStream(id: String, args: Bundle, cancellation: AudioCancellation,
+    onStarted: () -> Unit, onFinished: (String?) -> Unit): Boolean {
+    if (!connected.await(10, TimeUnit.SECONDS) || closed || service == null) { close(); return false }
+    val request = Pending(progress = {}, started = { onStarted() })
+    if (pending.putIfAbsent(id, request) != null) return false
+    val sent = try {
+      args.putString("jobId", id)
+      service!!.send(Message.obtain(null, AudioWorkerProtocol.STREAM).apply { data = args; replyTo = replies })
+      cancellation.onCancel {
+        runCatching { service?.send(Message.obtain(null, AudioWorkerProtocol.CANCEL).apply {
+          data = Bundle().apply { putString("jobId", id) }; replyTo = replies
+        }) }
+      }
+      true
+    } catch (_: Exception) { false }
+    if (!sent) { pending.remove(id, request); return false }
+    Thread({
+      try {
+        // 上限与 worker 侧一致（60 分钟）；超时让 worker 自己收尾，这里只负责回报
+        if (!request.latch.await(61, TimeUnit.MINUTES)) onFinished("音轨流等待超时")
+        else onFinished(request.error)
+      } catch (_: InterruptedException) { onFinished("音轨流已中断") }
+      finally { pending.remove(id, request) }
+    }, "audio-stream-wait").apply { isDaemon = true }.start()
+    return true
+  }
+
+  /** 停一路流：只发 CANCEL，不等待（worker 会自己取消 ffmpeg 并清理文件）。 */
+  fun stopStream(id: String) {
+    runCatching {
+      service?.send(Message.obtain(null, AudioWorkerProtocol.CANCEL).apply {
+        data = Bundle().apply { putString("jobId", id) }; replyTo = replies
+      })
+    }
+  }
 
   override fun close() {
     if (closed && !bound) return

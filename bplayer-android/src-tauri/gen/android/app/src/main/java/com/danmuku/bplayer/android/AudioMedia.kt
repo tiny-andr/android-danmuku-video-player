@@ -35,9 +35,12 @@ internal object AudioMedia {
         .put("number", stream.optInt("index") + 1).put("lang", tags?.optString("language") ?: "")
         .put("name", tags?.optString("title") ?: "")
         .put("default", stream.optJSONObject("disposition")?.optInt("default") == 1)
-        .put("channels", stream.optInt("channels")))
+        .put("channels", stream.optInt("channels"))
+        // PTS 起点也带出去：外壳要拿它算 offset，才能在后续 prepare 里免掉一次完整 ffprobe
+        .put("start_time", stream.opt("start_time")?.toString() ?: JSONObject.NULL))
     }
   }).put("duration_us", duration(probe)?.let { (it * 1_000_000).toLong() } ?: JSONObject.NULL)
+    .put("origin", probe.optJSONObject("format")?.opt("start_time")?.toString() ?: "0")
 
   fun offset(probe: JSONObject, audioIndex: Int): Double {
     val audio = streams(probe).filter { it.optString("codec_type") == "audio" }.getOrNull(audioIndex)

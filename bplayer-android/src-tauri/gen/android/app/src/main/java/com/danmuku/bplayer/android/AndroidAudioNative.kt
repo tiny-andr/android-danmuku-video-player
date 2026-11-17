@@ -3,6 +3,7 @@ package com.danmuku.bplayer.android
 import android.content.Context
 import android.net.Uri
 import android.os.Bundle
+import android.util.Base64
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import org.json.JSONArray
@@ -22,6 +23,7 @@ internal object AudioRequestArguments {
 @androidx.annotation.Keep
 internal class AndroidAudioNative(context: Context, private val webView: WebView) : Closeable {
   private val context = context.applicationContext
+  private val STREAM_MIME = "audio/mp4; codecs=\"mp4a.40.2\""
   private val executor = ThreadPoolExecutor(1, 1, 30, TimeUnit.SECONDS, LinkedBlockingQueue(16),
     { task -> Thread(task, "audio-task").apply { isDaemon = true } })
   private data class Task(val session: String, val cancellation: AudioCancellation)
@@ -29,6 +31,7 @@ internal class AndroidAudioNative(context: Context, private val webView: WebView
     val stat: RemoteStat, val identity: String, val offset: Double, val duration: Double?, val exactDuration: Boolean, val created: Long)
   private val tasks = ConcurrentHashMap<String, Task>()
   private val permits = ConcurrentHashMap<String, Permit>()
+  private val streams = ConcurrentHashMap<String, StreamState>()
   private val cancelled = ConcurrentHashMap.newKeySet<String>()
   private val cancelledJobs = ConcurrentHashMap.newKeySet<String>()
   @Volatile private var worker: AudioWorkerClient? = null
@@ -40,7 +43,7 @@ internal class AndroidAudioNative(context: Context, private val webView: WebView
     if (closed || id.length > 256) return
     webView.post {
       if (closed || !trustedPage()) return@post
-      if (argsJson.length > 65536 || command !in setOf("audio_probe", "audio_prepare", "audio_start", "audio_cancel", "audio_cache_files", "network_subtitle")) {
+      if (argsJson.length > 65536 || command !in setOf("audio_probe", "audio_prepare", "audio_start", "audio_cancel", "audio_cache_files", "network_subtitle", "audio_stream_open", "audio_stream_read", "audio_stream_close")) {
         reply(id, false, "不支持或过大的音轨请求"); return@post
       }
       val args = runCatching { JSONObject(argsJson) }.getOrElse { reply(id, false, "音轨请求格式不正确"); return@post }
@@ -70,12 +73,19 @@ internal class AndroidAudioNative(context: Context, private val webView: WebView
                 AudioSourceAccess(context, video, cancellation).use { source ->
                   val stat = source.stat()
                   val identity = source.identity(stat)
-                  val raw = probe(source, video, UUID.randomUUID().toString(), cancellation)
-                  val selected = AudioMedia.streams(raw).filter { it.optString("codec_type") == "audio" }.getOrNull(index)
-                    ?: throw NetworkFailure("音轨序号不存在")
-                  val exact = AudioMedia.seconds(selected.opt("duration"))?.takeIf { it > 0 }
-                  val duration = exact ?: AudioMedia.duration(raw)
-                  val offset = AudioMedia.offset(raw, index)
+                  // 外壳刚做过 audio_probe，把时长和 PTS 起点带过来就不用再 ffprobe 一遍：
+                  // 网络源上那一步是一两秒的纯等待，而这两个值探测时已经拿到了。
+                  val hintDurationUs = args.optDouble("durationUs", 0.0)
+                  val hintOffset = args.optDouble("offsetSecs", Double.NaN)
+                  val raw = if (hintDurationUs > 0) null else probe(source, video, UUID.randomUUID().toString(), cancellation)
+                  val selected = raw?.let {
+                    AudioMedia.streams(it).filter { stream -> stream.optString("codec_type") == "audio" }.getOrNull(index)
+                      ?: throw NetworkFailure("音轨序号不存在")
+                  }
+                  val exact = selected?.let { AudioMedia.seconds(it.opt("duration"))?.takeIf { value -> value > 0 } }
+                  val duration = exact
+                    ?: (if (hintDurationUs > 0) hintDurationUs / 1_000_000.0 else AudioMedia.duration(raw!!))
+                  val offset = if (hintOffset.isFinite()) hintOffset else AudioMedia.offset(raw!!, index)
                   val target = source.target(index)
                   val cachedStat = source.stat(target)
                   if (cachedStat.kind == "file") {
@@ -131,6 +141,24 @@ internal class AndroidAudioNative(context: Context, private val webView: WebView
                 // Keep the media proxy alive for the whole extraction: it tears down with the source.
                 val isHttp = video.startsWith("http://") || video.startsWith("https://")
                 if (isHttp) run(video) else AudioSourceAccess(context, video, cancellation).use { run(it.input(video)) }
+              }
+              // Streaming audio for tracks the WebView cannot decode: ffmpeg writes fragmented
+              // MP4 into cacheDir, the page pulls incrementally and feeds a MediaSource, so
+              // sound starts in a second instead of after a full two-minute transcode.
+              "audio_stream_open" -> {
+                val videoPath = args.getString("videoPath")
+                val index = args.getInt("audioIndex")
+                if (index !in 0..127) throw NetworkFailure("音轨序号超出范围")
+                openStream(id, session, videoPath, index, args.optDouble("startSecs", 0.0))
+              }
+              "audio_stream_read" -> {
+                val state = streams[args.optString("streamId")] ?: throw NetworkFailure("音轨流已结束，请重新选择音轨")
+                val (data, eof) = readStream(state)
+                reply(id, true, JSONObject().put("data", data).put("eof", eof))
+              }
+              "audio_stream_close" -> {
+                streams[args.optString("streamId")]?.let { closeStream(it) }
+                reply(id, true, JSONObject.NULL)
               }
             }
           } catch (error: Exception) { reply(id, false, safeNetworkError(error)) }
@@ -204,6 +232,182 @@ internal class AndroidAudioNative(context: Context, private val webView: WebView
     }
   }
 
+  // ---------------------------------------------------------------------------------------------
+  // 流式音轨：ffmpeg 增量写碎片化 MP4，这里按 ISO-BMFF box 边界切块，页面拉去喂 MediaSource
+  // ---------------------------------------------------------------------------------------------
+
+  /**
+   * 一路流式音轨。文件是边转边长的，读位置只增不减；`eof` 由 worker 的终态回调置位，
+   * 之前读到的都是「当前已有」的字节，之后还要把尾巴读完才算结束。
+   */
+  private class StreamState(
+    val id: String,
+    val session: String,
+    val file: File,
+    val source: AudioSourceAccess,
+    val cancellation: AudioCancellation
+  ) {
+    val splitter = AudioBoxSplitter()
+    private var readOffset = 0L
+    @Volatile var eof = false
+    @Volatile var failure: String? = null
+    @Volatile var started = false
+
+    /** 把文件里新增的字节搬进切块器；返回是否搬到了数据。 */
+    fun pump(): Boolean {
+      val length = runCatching { file.length() }.getOrDefault(0L)
+      if (length <= readOffset) return false
+      val count = minOf(512L * 1024, length - readOffset).toInt()
+      val bytes = ByteArray(count)
+      val read = runCatching {
+        java.io.RandomAccessFile(file, "r").use { input ->
+          input.seek(readOffset)
+          input.read(bytes)
+        }
+      }.getOrDefault(-1)
+      if (read <= 0) return false
+      readOffset += read
+      splitter.feed(if (read == count) bytes else bytes.copyOf(read))
+      return true
+    }
+  }
+
+  /**
+   * 增量切 ISO-BMFF box：init（ftyp+moov）必须单独、最先交出去，之后每个 moof+mdat 是一块。
+   * 规则与 Windows 端 FragmentSplitter 相同；半个 box 交给 MSE 会直接报错，所以留在缓冲里等下一批。
+   */
+  private class AudioBoxSplitter {
+    private var buffer = ByteArray(0)
+    private var initBytes = ByteArray(0)
+    private var fragBytes = ByteArray(0)
+    private val ready = ArrayDeque<ByteArray>()
+    private var overflowed = false
+
+    fun feed(bytes: ByteArray) {
+      if (bytes.isEmpty()) return
+      buffer = if (buffer.isEmpty()) bytes else buffer + bytes
+      // 防御：切成 1 秒一片时任何一块都不该到 MB 级，堆积说明 muxer 参数不对
+      if (buffer.size > 32 * 1024 * 1024) { overflowed = true; buffer = ByteArray(0) }
+    }
+
+    fun take(): ByteArray? {
+      while (true) {
+        if (ready.isNotEmpty()) return ready.removeFirst()
+        if (overflowed) return null
+        val header = header(buffer) ?: return null
+        if (buffer.size < header.second) return null
+        val box = buffer.copyOfRange(0, header.second)
+        buffer = buffer.copyOfRange(header.second, buffer.size)
+        when {
+          // 第一个 fragment 到来前攒到的都是 init：先交付它，再把 moof 放回队首重来
+          header.first == "moof" && initBytes.isNotEmpty() -> {
+            ready.addLast(initBytes); initBytes = ByteArray(0)
+            buffer = box + buffer
+          }
+          header.first == "moof" -> fragBytes = if (fragBytes.isEmpty()) box else fragBytes + box
+          // moof 之后的 mdat 收完就是一个完整 fragment
+          header.first == "mdat" && fragBytes.isNotEmpty() -> {
+            fragBytes += box
+            ready.addLast(fragBytes); fragBytes = ByteArray(0)
+          }
+          fragBytes.isNotEmpty() -> fragBytes += box
+          else -> initBytes += box
+        }
+      }
+    }
+
+    /** 返回 (type, 总长度)；数据不够判定时返回 null。 */
+    private fun header(buf: ByteArray): Pair<String, Int>? {
+      if (buf.size < 8) return null
+      val size = ((buf[0].toInt() and 0xFF) shl 24) or ((buf[1].toInt() and 0xFF) shl 16) or
+        ((buf[2].toInt() and 0xFF) shl 8) or (buf[3].toInt() and 0xFF)
+      val type = String(buf, 4, 4, Charsets.US_ASCII)
+      if (size == 1) {
+        if (buf.size < 16) return null
+        var large = 0L
+        for (i in 8 until 16) large = (large shl 8) or (buf[i].toLong() and 0xFF)
+        return if (large in 16..0x40000000L) type to large.toInt() else null
+      }
+      return if (size in 8..0x40000000) type to size else null
+    }
+  }
+
+  private fun openStream(requestId: String, session: String, video: String, audioIndex: Int, startSecs: Double) {
+    // 一个 app 同时只播一路声音：开新流一律顶掉旧的。旧流可能是上一次播放、或者页面重载
+    // 之后 JS 侧已经忘记的那一路 —— 不在这里清掉，worker 会一直“音轨任务正忙”。
+    streams.values.toList().forEach { closeStream(it) }
+    val id = UUID.randomUUID().toString()
+    val cancellation = AudioCancellation()
+    val source = AudioSourceAccess(context, video, cancellation)
+    val dir = File(context.cacheDir, "stream")
+    if (!dir.isDirectory && !dir.mkdirs()) {
+      source.close()
+      throw NetworkFailure("无法建立音轨流缓存目录")
+    }
+    val output = File(dir, "$id.mp4")
+    val state = StreamState(id, session, output, source, cancellation)
+    streams[id] = state
+    try {
+      val dispatched = client().startStream(id, Bundle().apply {
+        putString("input", source.input())
+        putInt("audioIndex", audioIndex)
+        putDouble("startSecs", startSecs)
+        putString("output", output.absolutePath)
+      }, cancellation, onStarted = { state.started = true }) { error ->
+        if (error != null) state.failure = error
+        state.eof = true
+      }
+      if (!dispatched) throw NetworkFailure("音轨服务未能启动")
+      val deadline = System.currentTimeMillis() + 25000L
+      while (!state.started && state.failure == null && !state.eof) {
+        if (cancellation.cancelled) throw NetworkFailure("音轨流已取消")
+        if (System.currentTimeMillis() > deadline) throw NetworkFailure("音轨流启动超时，请重试")
+        Thread.sleep(20L)
+      }
+      state.failure?.let { throw NetworkFailure(it) }
+      if (!state.started) throw NetworkFailure("音轨流未能开始输出")
+      reply(requestId, true, JSONObject().put("id", id).put("mime", STREAM_MIME).put("startSecs", startSecs))
+    } catch (error: Exception) {
+      closeStream(state)
+      throw error
+    }
+  }
+
+  /**
+   * 读一块可交给 MSE 的数据。返回值 `(base64, eof)`：base64 为空且 eof=false 表示
+   * 「文件暂时没有新内容，过一会儿再来读」——转码刚起或网络源卡住时都会这样，页面重试即可。
+   */
+  private fun readStream(state: StreamState): Pair<String, Boolean> {
+    val deadline = System.currentTimeMillis() + 400L
+    while (true) {
+      state.pump()
+      state.splitter.take()?.let { return Base64.encodeToString(it, Base64.NO_WRAP) to false }
+      if (state.eof) {
+        // 终态之后再读一遍，把 ffmpeg 已经写好但还没搬走的尾巴交出去
+        while (true) {
+          val more = state.pump()
+          val rest = state.splitter.take()
+          if (rest != null) return Base64.encodeToString(rest, Base64.NO_WRAP) to false
+          if (!more) break
+        }
+        state.failure?.let { throw NetworkFailure(it) }
+        return "" to true
+      }
+      state.failure?.let { throw NetworkFailure(it) }
+      if (System.currentTimeMillis() >= deadline) return "" to false
+      Thread.sleep(20L)
+    }
+  }
+
+  private fun closeStream(state: StreamState) {
+    if (!streams.remove(state.id, state)) return
+    state.eof = true
+    state.cancellation.cancel()
+    runCatching { worker?.stopStream(state.id) }
+    runCatching { state.source.close() }
+    runCatching { state.file.delete() }
+  }
+
   private fun cancel(args: JSONObject): Boolean {
     val session = session(args)
     val job = AudioRequestArguments.cancelJob(args)
@@ -214,6 +418,10 @@ internal class AndroidAudioNative(context: Context, private val webView: WebView
     }
     permits.entries.filter { it.value.session == session && (job.isEmpty() || it.key == job) }.forEach { (id, permit) ->
       if (permits.remove(id, permit)) changed = true
+    }
+    // 会话级取消（换轨 / 退出播放）要连流式音轨一起停：它没有 jobId，只有自己的 stream id。
+    if (job.isEmpty()) {
+      streams.values.filter { it.session == session }.toList().forEach { closeStream(it); changed = true }
     }
     return changed
   }
@@ -234,11 +442,14 @@ internal class AndroidAudioNative(context: Context, private val webView: WebView
     if (!value) {
       tasks.values.forEach { it.cancellation.cancel() }
       permits.clear()
+      // 后台不转码：回到前台重新选音轨会再开一条，省电也省 CPU
+      streams.values.toList().forEach { closeStream(it) }
     }
   }
   override fun close() {
     closed = true
     tasks.values.forEach { it.cancellation.cancel() }
+    streams.values.toList().forEach { closeStream(it) }
     permits.clear(); executor.shutdownNow(); worker?.close(); worker = null
   }
 }

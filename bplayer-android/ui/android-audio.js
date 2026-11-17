@@ -11,6 +11,20 @@
   "use strict";
 
   function abortError(message) { var error = new Error(message || "Audio task cancelled"); error.name = "AbortError"; return error; }
+
+  // 音轨 PTS 起点相对容器起点的偏移。探测结果里带出来（start_time/origin），
+  // 后续 prepare 拿它当提示，就不用为了这两个数再 ffprobe 一次。
+  function probeOffset(probe, audioIndex) {
+    if (!probe || !probe.tracks) return 0;
+    var audio = probe.tracks.filter(function (track) { return track.kind === "audio"; })[audioIndex];
+    if (!audio) return 0;
+    var origin = Number(probe.origin);
+    if (!isFinite(origin)) origin = 0;
+    var start = audio.start_time == null ? origin : Number(audio.start_time);
+    if (!isFinite(start)) start = origin;
+    var value = start - origin;
+    return isFinite(value) ? Math.max(-3600, Math.min(3600, value)) : 0;
+  }
   function uuid(environment) {
     if (environment.crypto && environment.crypto.randomUUID) return environment.crypto.randomUUID();
     var bytes = new Uint8Array(16);
@@ -130,7 +144,12 @@
       state.phase = "preparing"; state.selectedIndex = audioIndex; state.activeIndex = -1;
       try {
         emit("isolate"); emit("selecting", audioIndex);
-        var prepared = await tasks.request("audio_prepare", { videoPath: owner.video, audioIndex: audioIndex, session: owner.session });
+        // 探测结果里已经有时长和 PTS 起点，带上它们，prepare 就不用再跑一次 ffprobe
+        var prepared = await tasks.request("audio_prepare", {
+          videoPath: owner.video, audioIndex: audioIndex, session: owner.session,
+          durationUs: state.probe && state.probe.duration_us ? state.probe.duration_us : 0,
+          offsetSecs: probeOffset(state.probe, audioIndex)
+        });
         if (!owns(owner)) return;
         if (!prepared || typeof prepared.jobId !== "string" || typeof prepared.target !== "string") throw new Error("音轨缓存准备结果无效");
         state.jobId = prepared.jobId;
@@ -140,6 +159,22 @@
           emit("disabled", { audioIndex: audioIndex }); return;
         }
         state.phase = "starting"; emit("progress", { percent: -1, written: 0 });
+        // 流式接管：边转边播（MSE），不用等整条音轨转完。失败就原样退回下面的整段转码，
+        // 那条链路和缓存复用都保持不变，流式只是「先出声」的加速路径。
+        // 进来先停掉上一路：换轨时旧流的 ffmpeg 和增长文件都必须立刻收掉。
+        if (hooks.stream) {
+          var streamed = false;
+          try { streamed = await hooks.stream({ videoPath: owner.video, audioIndex: audioIndex, session: owner.session }); }
+          catch (error) { streamed = false; }
+          if (!owns(owner)) return;
+          if (streamed) {
+            var permit = state.jobId; state.jobId = null;
+            if (permit) cancelNative(owner.session, permit);   // prepare 留下的 permit 不再需要
+            state.phase = "ready"; state.activeIndex = audioIndex;
+            emit("ready", { audioIndex: audioIndex, legacy: false });
+            return;
+          }
+        }
         await tasks.request("audio_start", { jobId: prepared.jobId, session: owner.session });
         if (!owns(owner)) return;
         if (state.phase === "starting") state.phase = "running";
@@ -151,7 +186,7 @@
     }
     function begin(video) {
       reset(); if (disposed) return null;
-      state = { session: tasks.uuid(), video: video, generation: 0, jobId: null, phase: "loading", tracks: [], activeIndex: -1, selectedIndex: -1 };
+      state = { session: tasks.uuid(), video: video, generation: 0, jobId: null, phase: "loading", tracks: [], probe: null, activeIndex: -1, selectedIndex: -1 };
       if (tasks.setCurrentSession) tasks.setCurrentSession(state.session);
       return state.session;
     }
@@ -162,8 +197,17 @@
       var owner = { session: state.session, generation: state.generation, video: state.video };
       emit("probing");
       try {
-        var probe = await tasks.request("audio_probe", { path: owner.video, session: owner.session });
+        // 同一条片反复打开时没必要每次都跑 ffprobe：网络源上那一步要好几秒。
+        // 缓存由外壳按「路径 + 大小 + 修改时间」校验，文件一变就自然失效。
+        var probe = null;
+        if (hooks.cachedProbe) { try { probe = await hooks.cachedProbe(owner.video); } catch (error) { probe = null; } }
+        if (!probe) {
+          probe = await tasks.request("audio_probe", { path: owner.video, session: owner.session }, { timeoutMs: 90000 });
+          if (!owns(owner)) return;
+          if (hooks.rememberProbe) { try { hooks.rememberProbe(owner.video, probe); } catch (error) { } }
+        }
         if (!owns(owner)) return;
+        state.probe = probe;
         state.tracks = (probe.tracks || []).filter(function (track) { return track.kind === "audio"; });
         state.phase = "idle"; emit("probe", { tracks: state.tracks.slice(), allTracks: probe.tracks || [], duration_us: probe.duration_us || null });
         if (!state.tracks.length) return;
@@ -279,7 +323,7 @@
         if (!active(entry)) return;
         var error = new Error("外挂音轨无法播放，缓存可能损坏或编码不受支持"); current = null; release(entry, error); if (entry.onError) entry.onError(error);
       }, entry.listeners);
-      entry.timer = schedule(function () { if (!active(entry)) return; var error = new Error("外挂音轨定位或缓冲超时"); current = null; release(entry, error); if (entry.onError) entry.onError(error); }, 15000);
+      entry.timer = schedule(function () { if (!active(entry)) return; var error = new Error("外挂音轨定位或缓冲超时"); current = null; release(entry, error); if (entry.onError) entry.onError(error); }, Number(options.timeoutMs) || 15000);
       try { audio.src = options.url; audio.load(); } catch (error) { current = null; release(entry, error); }
       return promise;
     }

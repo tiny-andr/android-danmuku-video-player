@@ -1729,10 +1729,55 @@
       $('audioCancel').hidden = !busy;
     }
 
+    // 音轨探测结果的缓存。ffprobe 在 NAS 上要读一两兆、花好几秒；同一部片重开的场景
+    // 占了大多数，用「路径 + 大小 + 修改时间」做键，文件一改就自然失效。
+    var AUDIO_PROBE_CACHE_KEY = 'bplayer.android.audioprobe.v2';
+    function audioProbeCacheAll() {
+      try {
+        var all = JSON.parse(localStorage.getItem(AUDIO_PROBE_CACHE_KEY) || '{}');
+        return all && typeof all === 'object' ? all : {};
+      } catch (error) { return {}; }
+    }
+    function readAudioProbeCache(path) {
+      return invoke('fs_stat', { path: path }).then(function (stat) {
+        if (!stat || stat.kind !== 'file') return null;
+        var hit = audioProbeCacheAll()[normPath(path)];
+        if (!hit || !hit.probe) return null;
+        if (hit.size !== stat.size || hit.mtime !== stat.modified_ms) return null;
+        if (Date.now() - (hit.at || 0) > 7 * 24 * 3600 * 1000) return null;
+        return hit.probe;
+      }).catch(function () { return null; });
+    }
+    function writeAudioProbeCache(path, probe) {
+      if (!probe || !probe.tracks || !probe.tracks.length) return;
+      invoke('fs_stat', { path: path }).then(function (stat) {
+        if (!stat || stat.kind !== 'file') return;
+        var all = audioProbeCacheAll();
+        all[normPath(path)] = { size: stat.size, mtime: stat.modified_ms, at: Date.now(), probe: probe };
+        var keys = Object.keys(all);
+        if (keys.length > 40) {
+          keys.sort(function (a, b) { return (all[a].at || 0) - (all[b].at || 0); });
+          keys.slice(0, keys.length - 40).forEach(function (key) { delete all[key]; });
+        }
+        try { localStorage.setItem(AUDIO_PROBE_CACHE_KEY, JSON.stringify(all)); } catch (error) { }
+      }).catch(function () { });
+    }
+
     function ensureAudioSession() {
       if (audioSession) return audioSession;
       audioSession = window.AndroidAudioSession.create(window.AndroidAudioTasks, {
         autoEnabled: function () { return appSettings.autoAudio; },
+        cachedProbe: readAudioProbeCache,
+        rememberProbe: writeAudioProbeCache,
+        // 流式接管：需要转码的音轨先边转边播（MSE）。返回 false 就原样走整段转码。
+        // 无论走不走流式，先把上一路停掉：换轨/取消时旧流不能留在后台占 CPU 和磁盘。
+        stream: function (options) {
+          stopStreamAudio();
+          if (!streamSupported()) return Promise.resolve(false);
+          var from = Number(art && art.currentTime) || 0;
+          diag('stream-hook', { index: options.audioIndex, from: Math.round(from * 10) / 10 });
+          return startStreamAudio(options.audioIndex, from, options.session);
+        },
         probing: function () {
           audioProbeInFlight = true;
           audioStatus('正在识别音轨…', false);
@@ -1818,6 +1863,7 @@
 
     function cancelAudioWork() {
       if (!audioSession) return;
+      stopStreamAudio();
       audioSession.cancel();   // 会话的 idle 钩子会收音轨胶囊；这里不动字幕那颗
       clearAudioPill();
       audioStatus('音轨处理已取消，可重新选择音轨重试。', false);
@@ -1845,6 +1891,7 @@
     }
 
     function resetAudioSession() {
+      stopStreamAudio();
       if (audioSession) audioSession.reset();
       if (audioTrack) audioTrack.reset();
       releaseVideoAudio(); externalOrdinal = -1; probeTracks = null; probeDurationUs = null;
@@ -1896,7 +1943,236 @@
       diag('video-audio-released');
     }
 
+    // ---- 流式音轨（MSE）：内核解不了的音轨边转边播，不用等整条转完 ----
+    // Windows 端是「ffmpeg 转 fMP4 → stdout 管道 → MSE」；安卓这边 FFmpegKit 把 stdout 当成
+    // 日志接管了，拿不到二进制，所以换成「ffmpeg 写增长文件 → 原生按 ISO-BMFF box 边界增量读
+    // → 前端 pull」。控制流和桌面版一致：只有队列见底才拉下一块，天然背压。
+    var STREAM_MIME = 'audio/mp4; codecs="mp4a.40.2"';
+    var STREAM_CHUNK_BYTES = 131072;
+    var STREAM_QUEUE_BYTES = 2 * 1024 * 1024;
+    var streamAudio = null;
+    var streamRestartTimer = 0;
+
+    function streamSupported() {
+      return !!(window.MediaSource && typeof MediaSource.isTypeSupported === 'function'
+        && MediaSource.isTypeSupported(STREAM_MIME));
+    }
+
+    function stopStreamAudio() {
+      if (streamRestartTimer) { clearTimeout(streamRestartTimer); streamRestartTimer = 0; }
+      var s = streamAudio;
+      if (!s) return;
+      streamAudio = null;
+      s.stopped = true;
+      if (s.settle) s.settle(false);   // 还在等「是否成功」的 select 立刻拿到 false，好回落到整段转码
+      try { if (s.sb) { s.sb.removeEventListener('updateend', onStreamUpdateEnd); } } catch (error) { }
+      if (s.id) {
+        try {
+          window.AndroidAudioTasks.request('audio_stream_close', { streamId: s.id, session: s.session }, { timeoutMs: 5000 })
+            .catch(function () { });
+        } catch (error) { }
+      }
+      try { if (s.url) URL.revokeObjectURL(s.url); } catch (error) { }
+      try { if (s.ms.readyState === 'open') s.ms.endOfStream(); } catch (error) { }
+      diag('stream-stopped', { id: s.id });
+    }
+
+    function startStreamAudio(audioIndex, from, session) {
+      return new Promise(function (resolve) {
+        if (!streamSupported() || !currentVideoPath || !audioTrack || !session) { resolve(false); return; }
+        stopStreamAudio();
+        var startAt = Math.max(0, Number(from) || 0);
+        window.AndroidAudioTasks.request('audio_stream_open', {
+          videoPath: currentVideoPath, audioIndex: audioIndex, startSecs: startAt, session: session
+        }, { timeoutMs: 30000 }).then(function (opened) {
+          if (!opened || !opened.id) { resolve(false); return; }
+          var ms = new MediaSource();
+          var url = URL.createObjectURL(ms);
+          var total = probeDurationUs ? probeDurationUs / 1000000 : (art && art.duration) || 0;
+          var s = {
+            id: opened.id, session: session, ms: ms, url: url, sb: null, sessionIndex: audioIndex,
+            audioIndex: audioIndex, startSecs: startAt, queue: [], queued: 0,
+            pulling: false, appending: false, eof: false, stopped: false, retries: 0, settle: null
+          };
+          var settled = false;
+          s.settle = function (ok) { if (!settled) { settled = true; resolve(!!ok); } };
+          streamAudio = s;
+          ms.addEventListener('sourceopen', function () {
+            if (s.stopped) return;
+            try { s.sb = ms.addSourceBuffer(opened.mime || STREAM_MIME); }
+            catch (error) { diag('stream-sb-fail', { err: String(error) }); s.settle(false); stopStreamAudio(); return; }
+            s.sb.mode = 'segments';
+            try { s.sb.timestampOffset = startAt; } catch (error) { }
+            // duration 必须在第一次 append 之前设：empty_moov 下 Chromium 报 Infinity，
+            // 而 append 之后再设会被「低于已缓冲末端」挡回来（InvalidStateError）。
+            if (total > 0) { try { ms.duration = total; } catch (error) { } }
+            s.sb.addEventListener('updateend', onStreamUpdateEnd);
+            s.sb.addEventListener('error', function () { diag('stream-sb-error', {}); });
+            s.settle(true);
+            pullStreamChunk();
+          });
+          // 挂到外挂音轨元素上。offset 必须是 0：SourceBuffer 的 timestampOffset 已经把这
+          // 一路流摆到视频时间轴上（startAt 处），再减一次 offset 会把定位点挪到流外，
+          // 元素就会一直停在 readyState=1 不出声。
+          audioTrack.update({
+            url: url, offset: 0,
+            valid: function () { return streamAudio === s && !s.stopped; },
+            onError: function (error) { diag('stream-audio-error', { err: String(error) }); },
+            // 网络源首块可能要十几秒：等「对齐」的超时按流式放宽，否则元素先被释放、
+            // 后面的数据全白拉了
+            timeoutMs: 90000
+          }).catch(function (error) { diag('stream-mount-fail', { err: String(error) }); });
+          bindStreamSeekWatch();
+          diag('stream-start', { from: startAt, index: audioIndex, total: total });        }).catch(function (error) {
+          diag('stream-open-fail', { err: String(error) });
+          resolve(false);
+        });
+      });
+    }
+
+    function appendStreamChunk() {
+      var s = streamAudio;
+      if (!s || s.stopped || !s.sb || s.appending || !s.queue.length || s.sb.updating) return;
+      var chunk = s.queue.shift();
+      s.appending = true;
+      s.queued = Math.max(0, s.queued - chunk.length);
+      try { s.sb.appendBuffer(chunk); }
+      catch (error) {
+        s.appending = false;
+        // 缓冲吃满：丢掉已经播过去的部分再塞回去，不然后面整条流都进不来
+        if (error && error.name === 'QuotaExceededError') {
+          s.queue.unshift(chunk); s.queued += chunk.length;
+          try {
+            var now = Number(art && art.currentTime) || 0;
+            if (now > 20) s.sb.remove(0, now - 20);
+          } catch (failure) { diag('stream-quota-fail', { err: String(failure) }); }
+          return;
+        }
+        diag('stream-append-fail', { err: String(error) });
+        s.stopped = true;
+      }
+    }
+
+    function onStreamUpdateEnd() {
+      var s = streamAudio;
+      if (!s || s.stopped) return;
+      s.appending = false;
+      if (s.queue.length) { appendStreamChunk(); return; }
+      if (s.eof) { try { if (s.ms.readyState === 'open') s.ms.endOfStream(); } catch (error) { } return; }
+      pullStreamChunk();
+    }
+
+    // 空数据（转码还没落盘 / 网络源卡顿）时退避重试；真正的失败由原生侧的 ERROR 打回
+    function pullStreamChunk() {
+      var s = streamAudio;
+      if (!s || s.stopped || s.eof || s.pulling || !s.sb || s.appending || s.sb.updating) return;
+      if (s.queued >= STREAM_QUEUE_BYTES) return;
+      s.pulling = true;
+      window.AndroidAudioTasks.request('audio_stream_read', {
+        streamId: s.id, session: s.session, maxBytes: STREAM_CHUNK_BYTES
+      }, { timeoutMs: 20000 }).then(function (result) {
+        s.pulling = false;
+        if (streamAudio !== s || s.stopped) return;
+        s.retries = 0;
+        if (result && result.eof) {
+          s.eof = true;
+          if (!s.queue.length && !s.appending) { try { if (s.ms.readyState === 'open') s.ms.endOfStream(); } catch (error) { } }
+          diag('stream-eof', {});
+          return;
+        }
+        var bytes = null;
+        if (result && result.data) {
+          try {
+            var bin = atob(result.data);
+            bytes = new Uint8Array(bin.length);
+            for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+          } catch (error) { bytes = null; }
+        }
+        if (bytes && bytes.length) { s.queue.push(bytes); s.queued += bytes.length; appendStreamChunk(); }
+        else setTimeout(pullStreamChunk, 60);
+      }).catch(function (error) {
+        s.pulling = false;
+        if (streamAudio !== s || s.stopped) return;
+        // AbortError = 会话正在切换（换轨/取消），旧流的在途读被主动拒掉了。
+        // 这既不是网络故障也不该重试，等 stopStreamAudio 接手即可。
+        if (error && error.name === 'AbortError') return;
+        s.retries++;
+        diag('stream-read-fail', { err: String(error), retries: s.retries });
+        if (s.retries > 6) {
+          s.stopped = true;
+          toast('音轨流中断：' + (error.message || error), 6000);
+          return;
+        }
+        setTimeout(pullStreamChunk, 200 * s.retries);
+      });
+    }
+
+    // 流式音轨的 seek 监听挂在真正的 video 元素上：`#player video` 在播放器刚挂载时可能还
+    // 查不到（监听就丢了），而 art.video 一定存在。
+    function bindStreamSeekWatch() {
+      var v = (art && art.video) || document.querySelector('video');
+      if (!v || v.__streamSeekBound) return;
+      v.__streamSeekBound = true;
+      v.addEventListener('seeking', function () { scheduleStreamRestart(Number(v.currentTime) || 0); });
+    }
+
+    function streamBufferedAt(time) {
+      var s = streamAudio;
+      if (!s || !s.sb) return false;
+      var b = s.sb.buffered;
+      for (var i = 0; i < b.length; i++) {
+        if (time >= b.start(i) - 0.08 && time <= b.end(i) + 0.08) return true;
+      }
+      return false;
+    }
+
+    // 跳到流没覆盖的位置就重起一路（ffmpeg 重新 seek 编码）。Windows 端同样在 seek 时重起，
+    // 只是那边靠管道，这边靠关文件再开一条。
+    function scheduleStreamRestart(time) {
+      var s = streamAudio;
+      if (!s || s.stopped || s.eof) return;
+      if (streamBufferedAt(time)) return;
+      if (streamRestartTimer) clearTimeout(streamRestartTimer);
+      streamRestartTimer = setTimeout(function () {
+        streamRestartTimer = 0;
+        if (!streamAudio || streamAudio.stopped) return;
+        var t = Number(art && art.currentTime) || 0;
+        if (streamBufferedAt(t)) return;
+        var index = streamAudio.audioIndex;
+        var session = streamAudio.session;
+        stopStreamAudio();
+        diag('stream-restart', { at: Math.round(t * 10) / 10, index: index });
+        startStreamAudio(index, t, session).then(function (ok) {
+          if (!ok) diag('stream-restart-fail', { at: t });
+        });
+      }, 250);
+    }
+
+    // 真机验收探针：从 CDP 直接读流状态，没有 UI 用途，也不影响正常播放
+    window.__bplayerStream = function () {
+      var s = streamAudio;
+      if (!s) return null;
+      var ranges = [];
+      // SourceBuffer 随时可能因为换轨被 detach：读 buffered 会抛 InvalidStateError，探针不该炸
+      try {
+        var b = s.sb ? s.sb.buffered : null;
+        if (b) { for (var i = 0; i < b.length; i++) ranges.push([Math.round(b.start(i) * 100) / 100, Math.round(b.end(i) * 100) / 100]); }
+      } catch (error) { ranges = ['detached']; }
+      var a = audioTrack ? audioTrack.audio : null;
+      return {
+        id: s.id, startSecs: s.startSecs, index: s.audioIndex, eof: s.eof, stopped: s.stopped,
+        queued: s.queued, appending: s.appending, pulling: s.pulling, retries: s.retries,
+        buffered: ranges,
+        audio: a ? {
+          currentTime: Math.round(a.currentTime * 100) / 100, paused: a.paused, readyState: a.readyState,
+          duration: isFinite(a.duration) ? Math.round(a.duration * 100) / 100 : String(a.duration),
+          decodedBytes: a.webkitAudioDecodedByteCount || 0, muted: a.muted, volume: a.volume
+        } : null
+      };
+    };
+
     function resetExternalAudio() {
+      stopStreamAudio();
       releaseVideoAudio();
       if (audioTrack) audioTrack.reset();
       externalOrdinal = -1; refreshAudioMenu();
@@ -1971,6 +2247,7 @@
       var defaultIndex = probeTracks.findIndex(function (t) { return !!t.default; });
       if (defaultIndex < 0) defaultIndex = 0;
       if (i === defaultIndex && !window.AndroidAudioSession.codec(track.codec).needsConversion) {
+        stopStreamAudio();
         if (audioSession) audioSession.reset();
         releaseVideoAudio();
         externalOrdinal = -1;

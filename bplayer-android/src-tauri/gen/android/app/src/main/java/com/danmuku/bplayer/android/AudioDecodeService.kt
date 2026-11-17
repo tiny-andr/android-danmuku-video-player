@@ -34,6 +34,16 @@ internal object AudioWorkerProtocol {
    * 不走 Job/转码流程（没有进度、不写视频同目录），结果是一个 cacheDir 里的 srt 文件路径。
    */
   const val EXTRACT_SUBTITLE = 4
+
+  /**
+   * 流式转码：单进程把选中音轨编成碎片化 MP4（fMP4）写到 cacheDir/stream/<jobId>.mp4，
+   * 前端边读边喂 MediaSource。与 [CONVERT] 的区别是没有进度百分比、不发布到视频同目录、
+   * 输出允许是半截的（取消/seek 就靠“停掉再开一条”）。参数：input / audioIndex / startSecs / output。
+   */
+  const val STREAM = 5
+
+  /** [STREAM] 已真正拉起 ffmpeg（输出文件路径随之返回），此后主进程可以开始增量读。 */
+  const val STARTED = 14
   const val PROGRESS = 10
   const val DONE = 11
   const val ERROR = 12
@@ -170,7 +180,27 @@ private class AdtsFrames(val totalFrames: Long, val keptFrames: Long, val length
 class AudioDecodeService : Service() {
   private val main = Handler(Looper.getMainLooper())
   @Volatile private var active: Job? = null
+  @Volatile private var stream: StreamJob? = null
   @Volatile private var destroyed = false
+
+  /**
+   * 一路流式转码。刻意不复用 [Job]：它没有进度、没有分片、没有发布流程，
+   * 生命周期就是「ffmpeg 在跑 → 结束/取消/超时」，混进 Job 只会把两套状态机搅在一起。
+   */
+  private inner class StreamJob(
+    val id: String,
+    val input: String,
+    val index: Int,
+    val startSecs: Double,
+    val output: File,
+    val client: Messenger
+  ) {
+    var sessionId: Long? = null
+    @Volatile var aborted = false
+    @Volatile var finished = false
+    val death = IBinder.DeathRecipient { main.post { abortStream(this) } }
+    val timeout = Runnable { finishStream(this, "音轨流超时，已停止", true) }
+  }
 
   private class Segment(val index: Int, val file: File, val startSample: Long, val endSample: Long,
     val rate: Int, val needFrames: Long) {
@@ -225,8 +255,13 @@ class AudioDecodeService : Service() {
   private val messenger = Messenger(Handler(Looper.getMainLooper()) { message ->
     when (message.what) {
       AudioWorkerProtocol.PROBE, AudioWorkerProtocol.CONVERT -> start(message)
+      AudioWorkerProtocol.STREAM -> startStream(message)
       AudioWorkerProtocol.EXTRACT_SUBTITLE -> extractSubtitle(message)
-      AudioWorkerProtocol.CANCEL -> active?.takeIf { it.id == message.data.getString("jobId") }?.let { cancel(it) }
+      AudioWorkerProtocol.CANCEL -> {
+        val id = message.data.getString("jobId")
+        active?.takeIf { it.id == id }?.let { cancel(it) }
+        stream?.takeIf { it.id == id }?.let { abortStream(it) }
+      }
     }
     true
   })
@@ -257,6 +292,18 @@ class AudioDecodeService : Service() {
         }
       }
     }
+    // Stream fragments are throwaway too: only the session that created them can read them,
+    // and a session never outlives the app process that owns it.
+    runCatching {
+      val streamDir = File(cacheDir, "stream").canonicalFile
+      if (streamDir.parentFile == parent) {
+        streamDir.listFiles()?.forEach { file ->
+          if (file.canonicalFile.parentFile == streamDir && file.isFile && identifier.matches(file.name.removeSuffix(".mp4"))) {
+            runCatching { file.delete() }
+          }
+        }
+      }
+    }
     FFmpegKitConfig.setSessionHistorySize(AudioSegmentation.SEGMENTS + 3)
     FFmpegKitConfig.enableLogCallback { _ -> }
   }
@@ -267,7 +314,9 @@ class AudioDecodeService : Service() {
     val client = message.replyTo ?: return
     val data = message.data
     val id = data.getString("jobId") ?: return
-    if (active != null || destroyed) { send(client, AudioWorkerProtocol.ERROR, id, "音轨任务正忙，请稍后重试"); return }
+    // 探测（PROBE）必须能和流式共存：换轨要先 probe 再开新流，把 probe 拒掉用户就换不了轨。
+    // 真正互斥的只有「整段转码」——两个重活会互相抢 CPU。
+    if (active != null || destroyed || (message.what == AudioWorkerProtocol.CONVERT && stream != null)) { send(client, AudioWorkerProtocol.ERROR, id, "音轨任务正忙，请稍后重试"); return }
     val job = try {
       AudioWorkerValidation.jobId(id)
       val input = AudioWorkerValidation.input(data.getString("input") ?: "")
@@ -301,7 +350,7 @@ class AudioDecodeService : Service() {
     if (!current(job)) return
     main.postDelayed(job.probeTimeout, 30000L)
     try {
-      val session = FFprobeKit.executeWithArgumentsAsync(arrayOf("-v", "error", "-probesize", "2097152", "-analyzeduration", "3000000", "-show_streams", "-show_format", "-of", "json", input)) { result ->
+      val session = FFprobeKit.executeWithArgumentsAsync(arrayOf("-v", "error", "-probesize", "524288", "-analyzeduration", "500000", "-show_streams", "-show_format", "-of", "json", input)) { result ->
         main.post {
           if (active === job && job.retiring && job.sessionId == result.sessionId) { release(job); return@post }
           if (!current(job) || job.sessionId != result.sessionId) return@post
@@ -698,8 +747,115 @@ class AudioDecodeService : Service() {
     } else job.terminalMessage?.let { send(job.client, AudioWorkerProtocol.ERROR, job.id, it) }
   }
 
-  private fun extractSubtitle(message: Message) {
+  // ---------------------------------------------------------------------------------------------
+  // 流式转码（STREAM）：单进程把一条音轨编成碎片化 MP4，供前端 MediaSource 边收边播
+  // ---------------------------------------------------------------------------------------------
+  private fun startStream(message: Message) {
     val client = message.replyTo ?: return
+    val data = message.data
+    val id = data.getString("jobId") ?: return
+    // 新流顶掉旧流：页面重载、或者上一路还没收到 CANCEL 就来了新的，都不该被「正忙」挡住。
+    // 被顶掉的那条会自己收尾（取消 ffmpeg + 删文件），与新流并行几百毫秒是能接受的。
+    stream?.let { abortStream(it) }
+    if (destroyed || active?.convert == true) {
+      send(client, AudioWorkerProtocol.ERROR, id, "音轨任务正忙，请稍后重试"); return
+    }
+    val job = try {
+      val input = AudioWorkerValidation.input(data.getString("input") ?: "")
+      val index = data.getInt("audioIndex", 0)
+      require(index in 0..127)
+      val start = data.getDouble("startSecs", 0.0)
+      require(start.isFinite() && start >= 0.0)
+      val output = File(data.getString("output") ?: "")
+      val root = File(cacheDir, "stream").canonicalFile
+      require(output.canonicalFile.parentFile == root && !output.exists())
+      StreamJob(AudioWorkerValidation.jobId(id), input, index, start, output.canonicalFile, client)
+    } catch (_: Exception) { send(client, AudioWorkerProtocol.ERROR, id, "音轨流参数无效"); return }
+    stream = job
+    try { client.binder.linkToDeath(job.death, 0) } catch (_: Exception) { abortStream(job); return }
+    main.postDelayed(job.timeout, 60 * 60 * 1000L)
+    job.output.parentFile?.mkdirs()
+    Log.i(TAG, "audio stream start index=${job.index} from=${job.startSecs} input=${job.input}")
+    try {
+      val session = FFmpegKit.executeWithArgumentsAsync(streamArgs(job)) { result -> main.post { streamDone(job, result) } }
+      job.sessionId = session.sessionId
+      // ffmpeg 已经在跑：主进程收到 STARTED 就可以开始读增长文件了（文件可能还是 0 字节）。
+      runCatching {
+        client.send(Message.obtain(null, AudioWorkerProtocol.STARTED).apply {
+          this.data = Bundle().apply { putString("jobId", job.id); putString("path", job.output.absolutePath) }
+        })
+      }
+    } catch (_: Exception) { finishStream(job, "音轨流未能启动", true) }
+  }
+
+  /**
+   * 流式转码参数。与整段转码的区别只有三处：
+   * `-ss` 放在输入侧（能听清“从当前位置开始”就不用等片头）、`-ac 2` 必须（MSE 只喂立体声）、
+   * 输出换成 fragmented MP4（`+frag_keyframe+empty_moov+default_base_moof` + 1 秒一片 + flush），
+   * 否则 muxer 会攒到结束才落盘，前端永远读不到数据。
+   */
+  private fun streamArgs(job: StreamJob): Array<String> {
+    val args = mutableListOf("-hide_banner", "-nostdin", "-v", "error", "-y",
+      "-probesize", "1048576", "-analyzeduration", "1000000")
+    if (job.startSecs > 0.05) { args.add("-ss"); args.add(String.format(java.util.Locale.US, "%.3f", job.startSecs)) }
+    args.addAll(listOf(
+      "-i", job.input,
+      "-map", "0:a:${job.index}", "-vn", "-sn", "-dn", "-map_metadata", "-1",
+      "-c:a", "aac", "-profile:a", "aac_low", "-ac", "2", "-ar", "48000", "-b:a", "192k",
+      "-af", "asetpts=PTS-STARTPTS",
+      "-f", "mp4", "-movflags", "+frag_keyframe+empty_moov+default_base_moof",
+      "-frag_duration", "1000000", "-flush_packets", "1",
+      job.output.absolutePath
+    ))
+    return args.toTypedArray()
+  }
+
+  private fun streamDone(job: StreamJob, result: FFmpegSession) {
+    if (stream !== job || job.finished) return
+    job.sessionId = null
+    if (job.aborted) return
+    if (!ReturnCode.isSuccess(result.returnCode)) {
+      val reason = result.output?.trim()?.take(200)?.ifEmpty { null } ?: "转码失败"
+      finishStream(job, "音轨流转换失败：$reason", true)
+      return
+    }
+    finishStream(job, null, false)
+  }
+
+  /** 流的唯一收尾点：成功发 DONE（带最终文件大小）、失败发 ERROR；取消/超时走同一个出口。 */
+  private fun finishStream(job: StreamJob, message: String?, removeFile: Boolean) {
+    if (stream !== job || job.finished) return
+    job.finished = true
+    stream = null
+    main.removeCallbacks(job.timeout)
+    runCatching { job.client.binder.unlinkToDeath(job.death, 0) }
+    if (removeFile) {
+      job.sessionId?.let { runCatching { FFmpegKit.cancel(it) } }
+      job.sessionId = null
+      // ffmpeg 停下之前还可能往文件里补几个字节：稍等再删，删不掉就留给下次启动的清理
+      main.postDelayed({ runCatching { job.output.delete() } }, 1500L)
+    } else {
+      job.sessionId = null
+    }
+    if (destroyed) return
+    if (message != null) { send(job.client, AudioWorkerProtocol.ERROR, job.id, message); return }
+    runCatching {
+      job.client.send(Message.obtain(null, AudioWorkerProtocol.DONE).apply {
+        data = Bundle().apply {
+          putString("jobId", job.id)
+          putString("result", JSONObject().put("path", job.output.absolutePath).put("size", job.output.length()).toString())
+        }
+      })
+    }
+  }
+
+  private fun abortStream(job: StreamJob) {
+    if (stream !== job) return
+    job.aborted = true
+    finishStream(job, "音轨任务已取消", true)
+  }
+
+  private fun extractSubtitle(message: Message) {    val client = message.replyTo ?: return
     val data = message.data
     val id = data.getString("jobId") ?: return
     val input = data.getString("input") ?: ""
@@ -749,6 +905,12 @@ class AudioDecodeService : Service() {
 
   override fun onDestroy() {
     destroyed = true
+    stream?.let { job ->
+      job.aborted = true
+      job.sessionId?.let { id -> runCatching { FFmpegKit.cancel(id) } }
+      runCatching { job.output.delete() }
+    }
+    stream = null
     active?.let { job ->
       job.aborted = true
       job.sessions().forEach { id -> runCatching { FFmpegKit.cancel(id) } }
