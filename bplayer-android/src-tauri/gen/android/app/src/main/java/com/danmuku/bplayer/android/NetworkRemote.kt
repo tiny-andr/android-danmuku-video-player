@@ -35,6 +35,12 @@ internal class PositionedNetworkStream(
   private val reader: (Long, ByteArray, Int, Int) -> Int,
   private val closer: () -> Unit
 ) : InputStream() {
+  // NanoHTTPD 的 Response 每次只读 16 KiB（Response.BUFFER_SIZE）。如果直接把它转成 SMB 读，
+  // 局域网每 16 KiB 就要往返一次，吞吐被锁在个位数 MB/s，4K 直读必然一直缓冲。
+  // 这里自己预读 1 MiB，把远端读放大 64 倍，上层那 16 KiB 的循环基本都命中缓冲。
+  private val prefetch = ByteArray(1024 * 1024)
+  private var prefetchStart = -1L
+  private var prefetchLength = 0
   @Volatile private var closed = false
   override fun read(): Int {
     val single = ByteArray(1)
@@ -44,8 +50,30 @@ internal class PositionedNetworkStream(
     if (closed) throw NetworkFailure("网络读取已取消")
     if (length == 0) return 0
     if (remaining == 0L) return -1
-    val count = reader(position, buffer, offset, minOf(length.toLong(), remaining, 256 * 1024L).toInt())
-    if (count <= 0) throw NetworkFailure("远端文件提前结束，请重新打开视频")
+    if (prefetchLength > 0) {
+      val hit = position - prefetchStart
+      if (hit >= 0 && hit < prefetchLength) {
+        val count = minOf(length.toLong(), prefetchLength - hit).toInt()
+        System.arraycopy(prefetch, hit.toInt(), buffer, offset, count)
+        position += count
+        remaining -= count
+        return count
+      }
+    }
+    val want = minOf(remaining, prefetch.size.toLong()).toInt()
+    // 单次远端读取可能受协商后的读上限限制（常见 64 KiB），循环把它填满，
+    // 否则预读就白做了。
+    var filled = 0
+    while (filled < want) {
+      val count = reader(position + filled, prefetch, filled, want - filled)
+      if (count <= 0) break
+      filled += count
+    }
+    if (filled <= 0) throw NetworkFailure("远端文件提前结束，请重新打开视频")
+    prefetchStart = position
+    prefetchLength = filled
+    val count = minOf(length, filled)
+    System.arraycopy(prefetch, 0, buffer, offset, count)
     position += count
     remaining -= count
     return count
