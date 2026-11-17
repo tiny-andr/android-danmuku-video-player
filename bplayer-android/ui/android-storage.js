@@ -13,6 +13,19 @@
   function acceptsFile(name) {
     return (mode === "subtitle" ? SUBTITLE : mode === "danmaku" ? DANMAKU : VIDEO).test(name);
   }
+  /* 弹幕标识：只读当前 list_dir 返回的同批条目（后端已放行 xml/json，见 lib.rs list_dir），
+     不会额外 invoke。配对规则与后端 pair_danmaku / scan_folder 一致：去掉最后一个扩展名后
+     小写全等，不做前缀匹配（`反派 (上).xml` 不会给 `反派 (上) 花絮.mp4` 打标）。 */
+  function baseName(name) { return String(name).replace(/\.[^.]+$/, "").toLowerCase(); }
+  function danmakuStemSet(entries) {
+    var stems = new Set();
+    (entries || []).forEach(function (entry) {
+      if (!entry || entry.is_dir) return;
+      var name = String(entry.name || "");
+      if (DANMAKU.test(name)) stems.add(baseName(name));
+    });
+    return stems;
+  }
   function pickerTitle() {
     return { file: "选择视频", dir: "选择文件夹", subtitle: "选择字幕", danmaku: "选择弹幕" }[mode];
   }
@@ -36,6 +49,11 @@
   var pageReady = false;
   var positions = new Map();
   var selection = null;
+  /* 非播放页的就地错误行（不用紫色浮条）。归属「当前这次目录会话」：notice 之后
+     再 navigate 一次会把旧提示清掉，不会挂着一条跟当前目录无关的旧错误。 */
+  var noticeEl = null;
+  var noticeText = "";
+  var noticeTicket = -1;
   var localDir = "/sdcard/Download";
   var networkDir = "";
   try {
@@ -199,8 +217,10 @@
       ".aFileLayout{flex:1;min-height:0;display:flex;flex-direction:column;}.aFileMain{flex:1;min-height:0;display:flex;flex-direction:column;}" +
       "#aFileTools{display:flex;gap:8px;align-items:center;padding:7px 16px;border-bottom:1px solid #ffffff10;}#aFileTools label{font-size:12px;color:#aeb8d4;display:flex;align-items:center;gap:6px;}#aFileSort{min-height:40px;max-width:130px;background:#171e2e;color:#eef0fa;border:1px solid #ffffff20;border-radius:10px;padding:4px 8px;}#aFileTools button{min-height:40px;font-size:12px;padding:6px 10px;}#aFileView{margin-left:auto;}" +
       ".aFileDetail{flex:1;min-width:0;display:flex;flex-direction:column;gap:5px;}.aFileDetail .aMeta{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;}" +
+      /* 「弹幕」标识：flex:0 0 auto 保证超长文件名只压缩 .aName（min-width:0 + 省略号）而不会把标签挤掉。 */
+      ".aDanmaku{flex:0 0 auto;display:inline-flex;align-items:center;padding:1px 7px;border:1px solid #a184ed55;border-radius:7px;background:#8b68ef1c;color:#c9b7ff;font-size:10.5px;line-height:1.65;font-weight:600;letter-spacing:.02em;white-space:nowrap}" +
       ".aFileThumb{display:none;width:100%;aspect-ratio:16/9;object-fit:cover;background:#202a3d;border-radius:10px;}.aFileThumb:not([src]){visibility:hidden;}" +
-      "#aFileList.is-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(145px,1fr));grid-auto-rows:max-content;gap:10px;align-content:start;}#aFileList.is-grid .aRow{position:relative;display:block;height:auto;min-width:0;align-self:start;overflow:hidden;padding:9px;background:#ffffff06;}#aFileList.is-grid .aFileDetail{margin-top:8px;}#aFileList.is-grid .aFileThumb{display:block;opacity:0;}#aFileList.is-grid .aFileThumb.thumbnail-ready{opacity:1;}#aFileList.is-grid .aFileIcon{width:100%;aspect-ratio:16/9;height:auto;font-size:30px;}#aFileList.is-grid .aFileThumb+.aFileIcon{position:absolute;left:9px;top:9px;width:calc(100% - 18px);}#aFileList.is-grid .aFileThumb.thumbnail-ready+.aFileIcon{display:none;}#aFileList.is-grid .aArrow{display:none;}#aFileList.is-grid .aName{width:100%;}#aFileList.is-grid .aStatus{grid-column:1/-1;}" +
+      "#aFileList.is-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(145px,1fr));grid-auto-rows:max-content;gap:10px;align-content:start;}#aFileList.is-grid .aRow{position:relative;display:block;height:auto;min-width:0;align-self:start;overflow:hidden;padding:9px;background:#ffffff06;}#aFileList.is-grid .aFileDetail{margin-top:8px;}#aFileList.is-grid .aFileThumb{display:block;opacity:0;}#aFileList.is-grid .aFileThumb.thumbnail-ready{opacity:1;}#aFileList.is-grid .aFileIcon{width:100%;aspect-ratio:16/9;height:auto;font-size:30px;}#aFileList.is-grid .aFileThumb+.aFileIcon{position:absolute;left:9px;top:9px;width:calc(100% - 18px);}#aFileList.is-grid .aFileThumb.thumbnail-ready+.aFileIcon{display:none;}#aFileList.is-grid .aArrow{display:none;}#aFileList.is-grid .aName{width:100%;}#aFileList.is-grid .aStatus{grid-column:1/-1;}#aFileList.is-grid .aDanmaku{position:absolute;right:9px;top:9px;z-index:1;margin:0;padding:0 6px;font-size:10px;background:#231b3fe0;border-color:#b6a3f580;}" +
       "@media(min-width:720px) and (min-height:540px){#aFileBox{max-width:1180px}.aFileLayout{flex-direction:row;}.aFileSidebar{flex:0 0 160px;border-right:1px solid #ffffff10;padding-top:12px;}#aFileMask .aTabs{flex-direction:column;margin:0 10px 14px;}#aFileMask #aQuick{flex-direction:column;overflow:auto;padding:0 10px;}#aFileMask .aTabs button{flex:none;text-align:left;}#aFileMask #aQuick button{text-align:left;}.aField.wide{grid-column:auto;}.aField:first-child{grid-column:1/-1;}}" +
       "@media(min-width:900px){#aFileMask{padding-top:calc(10px + env(safe-area-inset-top,0px));padding-bottom:calc(10px + env(safe-area-inset-bottom,0px))}#aFileBox{border:1px solid #ffffff15;border-radius:20px}}" +
       "@media(max-height:480px){.aTitleBar{padding-top:6px;padding-bottom:4px}.aTabs{margin-bottom:4px}.aTabs button{min-height:36px!important;padding:4px!important}#aQuick{padding-bottom:4px}#aFileHead{padding-top:4px;padding-bottom:4px}#aFileBar{padding-top:8px;padding-bottom:8px}}" +
@@ -274,6 +294,34 @@
     layout.append(sidebar, main); box.append(title, layout); mask.appendChild(box);
     document.body.appendChild(mask);
   }
+  /* 非播放页的就地错误：显示在文件浏览器自己的列表状态区（复用既有 .aStatus 样式），
+     不用紫色浮条，也不新增任何样式/占位块。返回 true 表示调用方不必再找别的落点。
+     归属当前这次目录会话（noticeTicket）：选目录失败时壳层会先把浏览器恢复到那个目录，
+     回包比对 generation 之后才认领，所以这里只排队，真正的插入在 renderEntries 末尾——
+     否则会被 navigate 回包里的 list.replaceChildren() 抹掉。 */
+  function notice(message) {
+    if (!mask || mask.hidden) return false;
+    noticeText = String(message || "");
+    if (!noticeText) return false;
+    noticeTicket = generation;
+    paintNotice();
+    return true;
+  }
+  function paintNotice() {
+    if (noticeEl && noticeEl.parentNode) noticeEl.parentNode.removeChild(noticeEl);
+    noticeEl = null;
+    if (!noticeText || !list) return;
+    noticeEl = node("div", "aStatus", noticeText);
+    noticeEl.setAttribute("role", "alert");
+    list.insertBefore(noticeEl, list.firstChild);
+  }
+  // 只清「比当前这次目录读取更早」的提示：它讲的是上一个目录的事。
+  function clearStaleNotice() {
+    if (!noticeText || noticeTicket >= generation) return;
+    noticeText = "";
+    if (noticeEl && noticeEl.parentNode) noticeEl.parentNode.removeChild(noticeEl);
+    noticeEl = null;
+  }
   function setSection(value) {
     section = value;
     document.getElementById("aLocalTab").setAttribute("aria-selected", String(value === "local"));
@@ -323,6 +371,7 @@
   async function navigate(dir) {
     ensure(); rememberPosition(); clearForm();
     var ticket = ++generation;
+    clearStaleNotice();   // 进入新目录：上一个目录留下的错误行不再适用
     dir = String(dir).replace(/\\/g, "/").replace(/\/+$/, "") || "/";
     requestedDir = dir; cwd = ""; page = "directory"; pageReady = false;
     persistDirectory(dir);
@@ -353,6 +402,7 @@
     if (!position && pageReady) position = capturePosition();
     clearThumbnails();
     currentEntries = entries;
+    var danmakuStems = danmakuStemSet(entries);
     list.replaceChildren(); list.scrollTop = 0;
     var displayedGrid = useGrid();
     list.classList.toggle("is-grid", displayedGrid);
@@ -368,7 +418,9 @@
       var empty = mode === "subtitle" ? "此文件夹没有字幕或子文件夹（SRT / ASS / SSA / VTT）" :
         mode === "danmaku" ? "此文件夹没有弹幕或子文件夹（XML / JSON）" :
         "此文件夹没有视频或子文件夹" + (mode === "dir" ? "\n仍可使用下方按钮选择它" : "");
-      status(empty); return;
+      status(empty);
+      paintNotice();
+      return;
     }
     entries.forEach(function (entry) {
       var row = button("", function () { if (entry.is_dir) navigate(entry.path); else if (mode !== "dir") close(entry.path); }, "aRow");
@@ -384,15 +436,23 @@
       var date = modified ? new Date(modified).toLocaleDateString("zh-CN") : "时间未知";
       detail.appendChild(node("span", "aMeta", entry.is_dir ? "文件夹" : [sizeText(entry.size), date].filter(Boolean).join(" · ")));
       row.appendChild(detail);
+      if (!entry.is_dir && VIDEO.test(entry.name) && danmakuStems.has(baseName(entry.name))) {
+        var badge = node("span", "aDanmaku", "弹幕");
+        badge.setAttribute("aria-label", "有同名弹幕");
+        row.appendChild(badge);
+      }
       if (entry.is_dir) row.appendChild(node("span", "aArrow", "›"));
       if (!entry.is_dir && mode === "dir") row.disabled = true;
       list.appendChild(row);
     });
     restorePosition(position);
     if (pageReady) rememberPosition();
+    // 列表刚被整体替换过：把排队中的就地错误插回列表顶部（选目录失败就靠这一步落位）
+    paintNotice();
   }
   async function showSources() {
     ensure(); rememberPosition(); clearForm(); var ticket = ++generation;
+    clearStaleNotice();
     page = "sources"; pageReady = false; requestedDir = ""; networkDir = "";
     try { localStorage.setItem("bplayer.android.networkDir", ""); } catch (error) {}
     setSection("network"); cwd = ""; updateFooter(false);
@@ -625,6 +685,9 @@
     ++generation;
     pageReady = false;
     clearThumbnails();
+    noticeText = "";   // 关掉浏览器就收掉这条就地错误，下次打开不该看见上次的失败
+    if (noticeEl && noticeEl.parentNode) noticeEl.parentNode.removeChild(noticeEl);
+    noticeEl = null;
     if (mask) { mask.hidden = true; clearForm(); }
     var resolve = resolvePicker; resolvePicker = null;
     if (resolve) resolve(value || null);
@@ -635,6 +698,7 @@
     return true;
   }
   window.AndroidFiles = { open: open, close: close, back: back, takeSelection: takeSelection, restore: restore,
+    notice: notice,
     get active() { return !!(mask && !mask.hidden); },
     invoke: invoke, mediaUrl: mediaUrl, isNetwork: isNetwork };
 })();

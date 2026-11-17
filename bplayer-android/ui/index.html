@@ -298,6 +298,35 @@
     font-size: 11px; color: var(--muted); line-height: 1.6;
     margin-top: -6px; opacity: .8;
   }
+  /* 设置页的反馈就地显示在这里：弹窗（toast）只留给播放页 */
+  .settings-status {
+    font-size: 12px; color: var(--accent); line-height: 1.6;
+    margin-top: -2px;
+  }
+  .settings-status[hidden] { display: none; }
+  /* ---- 应用更新行（Android 桥 AndroidUpdate） ---- */
+  .settings-update { display: flex; flex-direction: column; gap: 8px; padding-left: 0; }
+  #settingsUpdateRow[hidden] { display: none; } /* .settings-row 的 display:flex 会压过 UA 的 [hidden] */
+  .settings-update-line { font-size: 12px; color: var(--muted); line-height: 1.65; overflow-wrap: anywhere; }
+  .settings-update-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+  .settings-update button {
+    min-height: 34px; padding: 0 14px; border-radius: 8px; border: 1px solid var(--line);
+    background: #232733; color: var(--text); font: inherit; font-size: 12px; cursor: pointer;
+  }
+  .settings-update button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+  .settings-update button:disabled { opacity: .55; cursor: default; }
+  .settings-update button.primary { border-color: var(--accent); color: var(--accent); }
+  /* ---- 发现新版本弹窗：复用设置页卡片外观 ---- */
+  .update-modal { width: 520px; gap: 12px; }
+  .update-meta { display: flex; align-items: baseline; gap: 10px; font-size: 14px; color: var(--text); }
+  .update-meta #updateVersion { font-weight: 600; }
+  .update-meta #updateDate { color: var(--muted); font-size: 11px; }
+  .update-notes {
+    font-size: 12px; line-height: 1.7; color: var(--muted); white-space: pre-wrap;
+    overflow-wrap: anywhere; max-height: min(42vh, 360px); overflow-y: auto;
+    border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); padding: 10px 0;
+  }
+  .update-dialog-actions { flex-direction: row; justify-content: flex-end; }
   .switch { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); cursor: pointer; }
   .switch input { accent-color: var(--accent); width: 15px; height: 15px; cursor: pointer; }
   /* ---- 弹幕密度滑块（浮窗复用 block-panel 外壳） ---- */
@@ -500,8 +529,34 @@
         <div class="settings-desc">自动转码核心不支持的内置字幕到内存中并挂载播放。</div>
       </div>
 
-      <div class="settings-foot">音轨自动转换默认开启：内核解不了的音轨会自动转成外挂 AAC 并静音原轨，不会放出错的轨道。字幕的自动转换要读整片，默认关闭。同目录的外挂字幕、同名弹幕照旧自动加载。</div>
-      <div class="settings-ver" id="settingsVer">版本 —</div>
+      <div class="settings-row" id="settingsUpdateRow" hidden>
+        <div class="settings-update">
+          <div class="settings-update-line" id="updateStatus">当前版本 —</div>
+          <div class="settings-update-actions">
+            <button type="button" id="btnUpdateAction" class="primary">检查更新</button>
+            <button type="button" id="btnUpdateCancel" hidden>取消下载</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="settings-status" id="settingsStatus" hidden role="status"></div>
+    </div>
+  </div>
+
+  <!-- 发现新版本：标题 / 版本号 / 发布日期 / Release notes 纯文本 + 稍后/下载(安装) -->
+  <div class="settings-mask" id="updateMask" hidden>
+    <div class="settings-modal update-modal" role="dialog" aria-modal="true" aria-label="发现新版本">
+      <div class="settings-head">
+        <b>发现新版本</b>
+        <span class="spacer"></span>
+        <button type="button" id="updateClose" title="关闭">✕</button>
+      </div>
+      <div class="update-meta"><span id="updateVersion">—</span><span id="updateDate"></span></div>
+      <div class="update-notes" id="updateNotes"></div>
+      <div class="settings-update update-dialog-actions">
+        <button type="button" id="updateLater">稍后</button>
+        <button type="button" id="updateDownload" class="primary">下载</button>
+      </div>
     </div>
   </div>
 <div class="pill-stack" id="pillStack">
@@ -673,8 +728,37 @@
     var list = liveToasts();
     for (var i = 0; i < list.length; i++) removeToast(list[i]);
   }
+  // 手机壳退出播放时要能清掉播放页残留的浮条：`toastAllowed()` 只挡「新建」，
+  // 已经弹出来的那条会继续倒计时，退出到首页后仍然挂在屏幕上。
+  window.__aHideToast = hideToast;
+
+  // 紫色浮条只允许出现在播放页：首页/最近播放/设置页/文件浏览器一律不弹（反馈在各自就地位置）。
+  // 「播放页」判定优先用手机壳的播放会话 AndroidPlayback.active（playing 或 loading 才为真）：
+  // 它覆盖整段播放会话（含暂停、失败面板），退出播放立刻变假——比「首页占位是否隐藏」可靠。
+  // 旧判据 placeholder.hide 只在 setVideoFromUrl 里 add、从不 remove，退出播放后仍为真，
+  // 会把首页上的提示错误地放出来。
+  function toastAllowed() {
+    var playback = window.AndroidPlayback;
+    if (playback) return !!playback.active;
+    // 没有手机壳（桌面调试）时退回旧判据，桌面行为不变
+    var ph = $('placeholder');
+    return !!(ph && ph.classList.contains('hide'));
+  }
+
+  // 非播放页的反馈入口：绝不用紫色浮条。交给文件浏览器自己的就地错误位（多数非播放页
+  // 错误发生在那里，选目录失败时壳层还会自动把浏览器恢复到用户选的目录）；浏览器没开
+  // 就没有落点，只留控制台痕迹——守卫只是兜底，不能变成静默吞掉。
+  function noteOffPlayer(text) {
+    var files = window.AndroidFiles;
+    if (files && typeof files.notice === 'function' && files.notice(text)) return;
+    try { console.warn('[inline notice, no surface]', text); } catch (e) { }
+  }
 
   function toast(msg, ms) {
+    if (!toastAllowed()) {
+      try { console.warn('[toast suppressed: not on player]', msg); } catch (e) { }
+      return null;
+    }
     var dur = ms || 2600;
     // 长提示按阅读速度给足时间（约 4 字/秒，上限 20 秒）；读得快的人用右上角 × 直接关掉。
     var len = String(msg || '').length;
@@ -1393,9 +1477,15 @@
 
     async function openFolder(dir) {
       try {
-        var scan = await loadPlaylist(dir, true);
-        if (scan) toast('已加载播放列表 · ' + scan.episodes.length + ' 集');
-      } catch (error) { toast('读取文件夹失败：' + (error.message || String(error)), 7000); }
+        // 成功本来就会打开播放列表浮层（loadPlaylist 里 navigation.open('playlist')），
+        // 首页不为它再弹一条「已加载播放列表 · N 集」。
+        await loadPlaylist(dir, true);
+      } catch (error) {
+        // 目录读取失败必须让用户看见：loadPlaylist 的 catch 已经先把文件浏览器恢复到
+        // 用户选的目录，所以这条错误落在浏览器顶部（noteOffPlayer 的第一选择）；
+        // 恢复不出浏览器时（比如从播放页返回后的目录）退到首页那条内联提示。
+        noteOffPlayer('读取文件夹失败：' + (error.message || String(error)));
+      }
     }
 
     function desktopLoadDanmaku(name, text, owner) {
@@ -2583,9 +2673,33 @@
     invoke('get_autostart').then(function (on) {
       $('optAutostart').checked = !!on;
     }).catch(function () { $('optAutostart').checked = false; });
+    // 打开设置就刷新更新行；还没检查过（或上次静默检查失败）就顺手查一次。
+    if (updateBridge()) {
+      var state = parseUpdateState();
+      renderUpdate(state);
+      if (!state || state.phase === 'idle') startUpdateCheck(false);
+      else if (state.phase === 'downloading' || state.phase === 'checking') ensureUpdatePolling();
+    }
   }
 
   function closeSettings() { closePanel('settingsMask'); }
+
+  // 设置页的反馈一律走这一行（弹窗只留给播放页），5 秒后自动收起。
+  var settingsNoteTimer = 0;
+  function noteSettings(text) {
+    var el = $('settingsStatus');
+    if (!el) return;
+    if (settingsNoteTimer) { clearTimeout(settingsNoteTimer); settingsNoteTimer = 0; }
+    el.textContent = text || '';
+    el.hidden = !text;
+    if (text) {
+      settingsNoteTimer = setTimeout(function () {
+        el.hidden = true;
+        el.textContent = '';
+        settingsNoteTimer = 0;
+      }, 5000);
+    }
+  }
 
   // 版本号由后端 app_version 命令供给；前端先落地、命令可能还没注册，
   // 所以任何失败都停在占位「—」：设置页不能因为读不到版本就报错或空一块。
@@ -2623,10 +2737,10 @@
     var want = this.checked;
     invoke('set_autostart', { enable: want }).then(function (actual) {
       $('optAutostart').checked = !!actual;
-      toast(actual ? '已设置开机自动启动' : '已取消开机自动启动');
+      noteSettings(actual ? '已开启开机自启动' : '已关闭开机自启动');
     }).catch(function (e) {
       $('optAutostart').checked = !want;
-      toast('设置开机自启动失败：' + e, 6000);
+      noteSettings('设置自启动失败：' + e);
     });
   });
 
@@ -2639,14 +2753,294 @@
   $('optAutoAudio').addEventListener('change', function () {
     appSettings.autoAudio = this.checked;
     saveAppSettings();
-    toast(this.checked ? '已开启：自动转换不支持的音轨' : '已关闭：不支持的音轨需在「音轨」菜单里手动点选');
+    noteSettings(this.checked ? '已开启：自动转换不支持的音轨' : '已关闭：不支持的音轨需在「音轨」菜单里手动点选');
   });
 
   $('optAutoSubtitle').addEventListener('change', function () {
     appSettings.autoSubtitle = this.checked;
     saveAppSettings();
-    toast(this.checked ? '已开启：自动转换内嵌字幕' : '已关闭：内嵌字幕需在「字幕」菜单里手动选择');
+    noteSettings(this.checked ? '已开启：自动转换内嵌字幕' : '已关闭：内嵌字幕需在「字幕」菜单里手动选择');
   });
+
+  /* ---- 应用内升级（Android 桥 AndroidUpdate） ----
+     Kotlin 侧负责 Release 发现 / 镜像回退下载 / sha256 校验 / 调起系统安装器；
+     这里只负责设置页那一行状态、发现新版本弹窗和进度轮询。
+     桌面版没有这个桥：设置行保持隐藏，整块逻辑自然失效。 */
+  var updateReplies = {};
+  var updateSerial = 0;
+  var updatePoll = 0;
+  var updateState = null;
+  var updateDialogOpen = false;
+  var updatePending = 0;   // 在途请求数：桥是单链，重入只会被 Kotlin 拒绝，前端先挡掉
+  var updateNote = '';     // 本地短语（失败/已取消/已调起安装器），就地显示在状态行，不弹窗
+
+  if (navigation) {
+    navigation.register('updateMask',
+      function () { updateDialogOpen = true; $('updateMask').hidden = false; },
+      function () { updateDialogOpen = false; $('updateMask').hidden = true; },
+      function () { updateDialogOpen = false; });
+  }
+
+  function updateBridge() {
+    var bridge = window.AndroidUpdate;
+    return bridge && typeof bridge.request === 'function' && typeof bridge.state === 'function' ? bridge : null;
+  }
+
+  function parseUpdateState() {
+    var bridge = updateBridge();
+    if (!bridge) return null;
+    try { return JSON.parse(bridge.state() || '{}'); } catch (e) { return null; }
+  }
+
+  function updateRequest(command, args) {
+    var bridge = updateBridge();
+    if (!bridge) return Promise.reject(new Error('更新桥未就绪'));
+    var id = 'update-' + (++updateSerial);
+    return new Promise(function (resolve, reject) {
+      updatePending += 1;
+      updateReplies[id] = {
+        resolve: function (value) { updatePending = Math.max(0, updatePending - 1); resolve(value); },
+        reject: function (error) { updatePending = Math.max(0, updatePending - 1); reject(error); }
+      };
+      try { bridge.request(id, command, JSON.stringify(args || {})); }
+      catch (e) { delete updateReplies[id]; updatePending = Math.max(0, updatePending - 1); reject(e); }
+    });
+  }
+
+  window.__aUpdateReply = function (id, envelope) {
+    var entry = updateReplies[id];
+    if (!entry) return;
+    delete updateReplies[id];
+    var current = parseUpdateState();
+    if (current) renderUpdate(current);
+    if (!envelope || !envelope.ok) entry.reject(new Error((envelope && envelope.error) || '更新操作失败'));
+    else entry.resolve(envelope.result || null);
+  };
+
+  // 失败只说一句短语，就地显示在状态行；技术细节留在 Kotlin 的 state.error 里。
+  function shortUpdateError(message) {
+    var text = String(message || '');
+    if (/正在进行|请稍候|请求过多/.test(text)) return '正在检查，请稍候';
+    if (/校验值|digest/i.test(text)) return '缺少官方校验值';
+    if (/安装未知应用/.test(text)) return '需要安装权限';
+    if (/sha256|校验|大小不符/.test(text)) return '安装包校验失败，可重试';
+    if (/空间不足/.test(text)) return '存储空间不足';
+    if (/取消/.test(text)) return '已取消，可重试';
+    if (/还没有发布|没有 APK|不属于本仓库|不是正式发布|无法识别发布版本号|缺少 tag_name/.test(text)) return '暂时没有可用的更新包';
+    if (/超时|网络|连接|服务器|DNS|HTTP/i.test(text)) return '网络错误，可重试';
+    return '更新失败，可重试';
+  }
+
+  // 设置页不弹窗：任何反馈都写回这一行状态，弹窗（toast）只留给播放页。
+  function showUpdateNote(text) {
+    updateNote = String(text || '');
+    renderUpdate(parseUpdateState());
+  }
+
+  function formatUpdateBytes(value) {
+    var bytes = Number(value) || 0;
+    if (bytes < 1024) return bytes + ' B';
+    var units = ['KB', 'MB', 'GB'];
+    var index = -1;
+    do { bytes /= 1024; index += 1; } while (bytes >= 1024 && index < units.length - 1);
+    return bytes.toFixed(1) + ' ' + units[index];
+  }
+
+  function formatUpdateDate(value) {
+    var match = String(value || '').match(/^(\d{4})-(\d{2})-(\d{2})/);
+    return match ? match[1] + '-' + match[2] + '-' + match[3] : '';
+  }
+
+  function ensureUpdatePolling() {
+    if (updatePoll) return;
+    updatePoll = setInterval(function () {
+      var state = parseUpdateState();
+      renderUpdate(state);
+      if (!state || (state.phase !== 'downloading' && state.phase !== 'checking')) {
+        clearInterval(updatePoll);
+        updatePoll = 0;
+      }
+    }, 400);
+  }
+
+  function fillUpdateDialog(state) {
+    $('updateVersion').textContent = state && state.latestVersion ? 'v' + state.latestVersion : '—';
+    $('updateDate').textContent = formatUpdateDate(state && state.publishedAt);
+    $('updateNotes').textContent = (state && state.notes) || '此版本没有 Release 说明。';
+  }
+
+  function updateDialogAction(state) {
+    var button = $('updateDownload');
+    var phase = state && state.phase;
+    if (phase === 'downloaded') { button.textContent = '安装'; button.disabled = false; }
+    else if (phase === 'downloading') {
+      button.textContent = '下载中 ' + Math.floor(Number(state.percent) || 0) + '%';
+      button.disabled = true;
+    } else if (phase === 'error') { button.textContent = '重试下载'; button.disabled = false; }
+    else { button.textContent = '下载'; button.disabled = state && state.digestPresent === false; }
+  }
+
+  function openUpdateDialog(state) {
+    updateDialogOpen = true;
+    fillUpdateDialog(state);
+    updateDialogAction(state);
+    if (navigation) navigation.forward(function () { navigation.open('updateMask'); });
+    else $('updateMask').hidden = false;
+  }
+
+  function closeUpdateDialog() {
+    updateDialogOpen = false;
+    if (navigation && navigation.top === 'updateMask') navigation.close('updateMask');
+    else $('updateMask').hidden = true;
+  }
+
+  function requestUpdateDownload() {
+    ensureUpdatePolling();
+    updateRequest('download').then(function (result) {
+      updateNote = '';
+      if (result) renderUpdate(result);
+    }).catch(function (error) {
+      showUpdateNote(shortUpdateError(error && error.message));
+    });
+  }
+
+  function installUpdate() {
+    updateRequest('install').then(function (result) {
+      updateNote = '已调起系统安装器';
+      if (result) renderUpdate(result); else showUpdateNote(updateNote);
+      closeUpdateDialog();
+    }).catch(function (error) {
+      var message = String((error && error.message) || '');
+      // 未授权「安装未知应用」时 Kotlin 已经把系统设置页打开，这里只提醒一句
+      showUpdateNote(/安装未知应用/.test(message) ? '需要安装权限，已打开设置' : shortUpdateError(message));
+    });
+  }
+
+  function renderUpdate(state) {
+    var row = $('settingsUpdateRow');
+    var status = $('updateStatus');
+    var action = $('btnUpdateAction');
+    var cancelButton = $('btnUpdateCancel');
+    if (!row || !status || !action || !cancelButton) return;
+    if (!updateBridge()) { row.hidden = true; return; }
+    row.hidden = false;
+    updateState = state || null;
+    var phase = (state && state.phase) || 'idle';
+    var current = state && state.currentVersion ? 'v' + state.currentVersion : '—';
+    var latest = state && state.latestVersion ? 'v' + state.latestVersion : '';
+    var text = '当前版本 ' + current;
+    var label = '检查更新';
+    var disabled = false;
+    var busy = false;
+    var showCancel = false;
+    if (phase === 'checking') {
+      text += ' · 检查中…'; label = '检查中…'; disabled = true; busy = true;
+    } else if (phase === 'up_to_date') {
+      text += ' · 已是最新';
+    } else if (phase === 'available') {
+      if (state.digestPresent === false) {
+        text += ' · 该版本暂不可更新';
+      } else {
+        text += ' · 有新版本 ' + latest;
+        label = '查看更新';
+      }
+    } else if (phase === 'downloading') {
+      var percent = Number(state.percent) || 0;
+      text += ' · 下载中 ' + percent.toFixed(1) + '%（' + formatUpdateBytes(state.downloadedBytes) + ' / ' +
+        formatUpdateBytes(state.totalBytes) + '）';
+      label = '下载中…'; disabled = true; busy = true; showCancel = true;
+    } else if (phase === 'downloaded') {
+      text += ' · 已下载 ' + latest;
+      label = '安装';
+    } else if (phase === 'error') {
+      text += ' · ' + shortUpdateError(state.error);
+      if (state.latestVersion) label = '重试';
+    }
+    // 本地短语（桥拒绝/已取消/已调起安装器）就地显示在状态行，不弹窗；
+    // 与「已是最新」这类结论冲突时以本地短语为准（失败/进行中不该被旧结论盖住）。
+    if (updateNote && phase !== 'error' && phase !== 'checking') {
+      if (phase === 'idle' || phase === 'up_to_date') text = '当前版本 ' + current + ' · ' + updateNote;
+      else text += ' · ' + updateNote;
+    }
+    status.textContent = text;
+    action.textContent = label;
+    action.disabled = disabled;
+    action.className = disabled ? '' : 'primary';
+    cancelButton.hidden = !showCancel;
+    if (busy) ensureUpdatePolling();
+    syncUpdateDialog(state);
+  }
+
+  // 新版本/下载完成时弹出确认框；对话框开着就只同步版本号与按钮状态。
+  function syncUpdateDialog(state) {
+    if (!updateBridge() || !state) return;
+    if (!updateDialogOpen) {
+      if (state.phase === 'available' && state.digestPresent !== false) openUpdateDialog(state);
+      else if (state.phase === 'downloaded' && state.canInstall) openUpdateDialog(state);
+      return;
+    }
+    fillUpdateDialog(state);
+    updateDialogAction(state);
+  }
+
+  function startUpdateCheck(silent) {
+    if (!updateBridge()) return;
+    // 桥是单链，已有请求在跑时再点只会被 Kotlin 直接拒绝；这里先挡住并给一句就地反馈。
+    if (updatePending > 0) {
+      if (!silent) showUpdateNote('正在检查，请稍候');
+      return;
+    }
+    renderUpdate(parseUpdateState());
+    ensureUpdatePolling();
+    updateRequest('check').then(function (state) {
+      updateNote = '';
+      if (state) renderUpdate(state); // 有新版本时会自动弹出确认框
+    }).catch(function (error) {
+      if (silent) renderUpdate(parseUpdateState());
+      else showUpdateNote(shortUpdateError(error && error.message));
+    });
+  }
+
+  $('btnUpdateAction').addEventListener('click', function () {
+    if (!updateBridge()) return;
+    var state = parseUpdateState();
+    var phase = state && state.phase;
+    if (phase === 'available' && state.digestPresent !== false) { openUpdateDialog(state); return; }
+    if (phase === 'downloaded') { installUpdate(); return; }
+    startUpdateCheck(false);
+  });
+
+  $('btnUpdateCancel').addEventListener('click', function () {
+    updateRequest('cancel').then(function (result) {
+      updateNote = '已取消';
+      if (result) renderUpdate(result); else showUpdateNote(updateNote);
+    }).catch(function () { });
+  });
+
+  $('updateClose').addEventListener('click', closeUpdateDialog);
+  $('updateLater').addEventListener('click', closeUpdateDialog);
+  $('updateDownload').addEventListener('click', function () {
+    var state = parseUpdateState();
+    var phase = state && state.phase;
+    if (phase === 'downloaded') installUpdate();
+    else if (phase !== 'downloading') requestUpdateDownload();
+  });
+  $('updateMask').addEventListener('click', function (event) {
+    if (event.target === $('updateMask')) closeUpdateDialog();
+  });
+
+  // 设备验证用：CDP 里可直接 __BplayerUpdate.check()/testDownload({...}) 观察状态机
+  window.__BplayerUpdate = {
+    get state() { return parseUpdateState(); },
+    check: function () { return updateRequest('check'); },
+    download: function () { return updateRequest('download'); },
+    cancel: function () { return updateRequest('cancel'); },
+    install: function () { return updateRequest('install'); },
+    testDownload: function (options) { return updateRequest('download_for_test', options); },
+    render: function () { renderUpdate(parseUpdateState()); },
+    openDialog: function () { var state = parseUpdateState(); if (state && (state.phase === 'available' || state.phase === 'downloaded')) openUpdateDialog(state); }
+  };
+
     $('plClose').addEventListener('click', function () { navigation.close('playlist'); });
     $('btnAudioEntry').addEventListener('click', function () {
       var panel = $('audioPanel');
@@ -2766,6 +3160,8 @@
     bindSubtitleOptions();
     renderPlaylist();
     loadAppVersion(); // 启动即取版本：设置页占位行与首页标题共用这一次结果
+    // 启动后台静默检查一次：只提示有新版本，不自动下载安装；失败不打扰用户。
+    if (updateBridge()) setTimeout(function () { startUpdateCheck(true); }, 900);
   }
 
   loadBlockConfig();

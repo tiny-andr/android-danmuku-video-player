@@ -211,11 +211,14 @@
    * 文件浏览器
    * ------------------------------------------------------------------ */
   function showStorageError(error) {
-    // 提示栈在 index.html 里（window.__aToast），这里只借它的接口：旧的 #toast/#toastText
-    // 单节点已换成栈，壳层直接改 DOM 会和栈里排队的提示打架（覆盖队首文本并重置计时）。
+    // 非播放页一律不用紫色浮条：先交给文件浏览器自己的就地错误位（存储类错误多数发生在
+    // 浏览器里，选目录失败时浏览器还会被壳层自动恢复出来）；只有播放页才允许走提示栈。
+    // 两个位置都没有时退到控制台，不静默吞掉。
     var message = "读取失败：" + (error && error.message ? error.message : String(error));
-    if (window.__aToast) { window.__aToast(message, 6000); return; }
-    // index.html 还没执行完（启动早期）时兜底：console 里留痕，不要静默吞掉
+    if (window.AndroidFiles && window.AndroidFiles.notice && window.AndroidFiles.notice(message)) return;
+    if (window.AndroidPlayback && window.AndroidPlayback.active && window.__aToast) {
+      window.__aToast(message, 6000); return;
+    }
     if (window.console && console.warn) console.warn(message);
   }
 
@@ -901,6 +904,9 @@
     openInfo(false);
     setImmersive(false); setPlaybackActive(false); setVideoOrientation(0, 0);
     window.AndroidGestures.setActive(false);
+    // 浮条只允许出现在播放页：退出播放时要把还挂着的那条一起收掉。
+    // toastAllowed() 只挡新建，已经弹出来的会继续倒计时，返回首页后仍停留在屏幕上。
+    try { if (window.__aHideToast) window.__aHideToast(); } catch (error) {}
     renderRecent();
     restoreOrigin(origin);
   }
@@ -1009,14 +1015,6 @@
     if (opt && opt.closest) {
       var row = opt.closest(".settings-row");
       if (row) row.style.display = "none"; // 手机没有开机启动项
-    }
-    var modal = document.querySelector("#settingsMask .settings-modal");
-    var head = modal && modal.querySelector(".settings-head");
-    if (head && !document.getElementById("mSettingsNote")) {
-      var note = el("div", "settings-desc", "Android 版：音轨兼容处理会生成同目录 AAC 缓存，原视频不修改；首次需等待，离开前台会取消。两小时音轨约 173 MB。内嵌字幕自动抽取仍未实现，外挂字幕可直接载入。");
-      note.id = "mSettingsNote";
-      note.style.paddingLeft = "0";
-      head.parentNode.insertBefore(note, head.nextSibling);
     }
   }
 

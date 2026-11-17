@@ -26,6 +26,7 @@ class MainActivity : TauriActivity() {
   private var thumbnails: AndroidThumbnails? = null
   private var playbackAudio: PlaybackAudioFocus? = null
   private var audioNative: AndroidAudioNative? = null
+  private var updateChecker: UpdateChecker? = null
   private var immersive = false
   private var playbackActive = false
   private var keepScreenOn = true
@@ -139,6 +140,10 @@ class MainActivity : TauriActivity() {
     playbackAudio?.close()
     playbackAudio = PlaybackAudioFocus(applicationContext, webView)
     webView.addJavascriptInterface(playbackAudio!!, "AndroidPlaybackAudio")
+    // 应用内升级：检查 GitHub Release → 镜像下载 → sha256 校验 → 调起系统安装器。
+    updateChecker?.close()
+    updateChecker = UpdateChecker(applicationContext, this, webView)
+    webView.addJavascriptInterface(updateChecker!!, "AndroidUpdate")
     // 播放页 JS 通过它控制系统栏；只暴露两个最小能力。
     webView.addJavascriptInterface(object {
       @JavascriptInterface
@@ -240,6 +245,9 @@ class MainActivity : TauriActivity() {
     webView?.removeJavascriptInterface("AndroidPlaybackAudio")
     playbackAudio?.close()
     playbackAudio = null
+    webView?.removeJavascriptInterface("AndroidUpdate")
+    updateChecker?.close()
+    updateChecker = null
     network?.close()
     network = null
     networkPermissionWaiters.clear()
