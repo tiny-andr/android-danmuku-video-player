@@ -378,36 +378,19 @@ fn set_autostart(_enable: bool) -> bool {
     false
 }
 
-/// 列出同名缓存文件（转码生成的 `(AAC)` mka / srt），给缓存管理用。目录遍历搬进阻塞线程池。
+/// 旧桌面版「同名缓存列表」入口。**故意只返回空列表**，绝不再遍历目录。
+///
+/// 历史实现按「`{stem} (` 前缀 + 文件名含 `.tmp.`」匹配同目录的 `.mka`/`.srt`，把结果
+/// 当成可以清理的派生缓存；桌面版实测会连用户自己的普通文件一起误删（`反派 (上).tmp.txt`、
+/// `某片 (备注).tmp.mka` 这类名字碰巧套娃的文件），Windows 侧已明令禁止这种判据。
+///
+/// Android 这边这条通路没有调用方（`ui/` 里只剩 `android-storage.js` 的网络路径短路分支，
+/// 没有任何 `invoke('sidecar_cache_files')`），本地/网络缓存统一走 `AndroidAudioNative` 的
+/// `audio_cache_files`，真正的 staging 清理在 Kotlin `AudioDecodeService` 里按会话 UUID
+/// 目录精确删除。命令保留注册只是为了旧前端 invoke 不报错，返回值恒为空。
 #[tauri::command]
-async fn sidecar_cache_files(video_path: String) -> Vec<String> {
-    blocking(move || {
-        let vp = Path::new(&video_path);
-        let Some(dir) = vp.parent() else { return Vec::new() };
-        let stem = vp.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-        if stem.is_empty() {
-            return Vec::new();
-        }
-        let prefix = format!("{stem} (");
-        let mut out = Vec::new();
-        if let Ok(rd) = fs::read_dir(dir) {
-            for e in rd.flatten() {
-                let name = e.file_name().to_string_lossy().into_owned();
-                if !name.starts_with(&prefix) || name.contains(".tmp.") {
-                    continue;
-                }
-                let lower = name.to_ascii_lowercase();
-                if lower.ends_with(".mka") || lower.ends_with(".srt") {
-                    out.push(e.path().to_string_lossy().into_owned());
-                }
-            }
-        }
-        out.sort();
-        out
-    })
-    .await
-    // 原命令失败时返回空列表，保持前端语义。
-    .unwrap_or_default()
+async fn sidecar_cache_files(_video_path: String) -> Vec<String> {
+    Vec::new()
 }
 
 // ---------------- 版本信息 ----------------
@@ -492,6 +475,12 @@ fn transcode_audio_cancel() -> Result<bool, String> {
     Ok(false)
 }
 
+/// 旧桌面版清理半成品缓存的入口，Android 上是**有意的空实现**。
+///
+/// 前端 `index.html` 换片时仍会 `invoke('clean_sidecar_tmp', …)`，所以保留注册；
+/// 真正的 staging 清理在 Kotlin `AudioDecodeService` 里按会话 UUID 目录精确删除。
+/// 禁止在这里恢复「基名前缀 + 含 `.tmp.`」的目录扫描：桌面实测会误删用户文件
+/// （`反派 (上).tmp.txt`、`某片 (备注).tmp.mka`）。见 `sidecar_cache_files` 的说明。
 #[tauri::command]
 fn clean_sidecar_tmp(_video_path: String) -> Result<(), String> {
     Ok(())

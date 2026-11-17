@@ -68,14 +68,41 @@
     return String(hours).padStart(2, "0") + ":" + String(minutes).padStart(2, "0") + ":" + String(seconds).padStart(2, "0") + "." + String(value % 1000).padStart(3, "0");
   }
 
-  function cue(start, end, text) {
-    var first = milliseconds(start);
-    var last = milliseconds(end);
-    if (first == null || last == null || last <= first) throw new Error("Invalid subtitle cue time");
+  function makeCue(first, last, text) {
     var body = plainText(text);
     return body ? { start: first, end: last, text: body } : null;
   }
 
+  function cue(start, end, text) {
+    var first = milliseconds(start);
+    var last = milliseconds(end);
+    if (first == null || last == null || last <= first) throw new Error("Invalid subtitle cue time");
+    return makeCue(first, last, text);
+  }
+
+  // 时间码形状：只有两侧真的像 `[h:]m:s[.,]fff` 才算时间轴行。
+  // 这样「a --> b」「100 --> 200」这类正文里的箭头不会被误判成坏时间轴。
+  function clockLike(token) {
+    return /^\d/.test(token) && token.indexOf(":") > 0;
+  }
+
+  // 时间轴行识别。返回 null 表示普通正文行；返回 { valid:false } 表示
+  // 长得像时间轴却解析不出来（坏 cue 的边界，其后正文必须丢掉）。
+  function classifyTiming(line) {
+    var match = line.match(/^(?:\d+[ \t]+)?(\S*?)\s*-->\s*(\S+)(?:[ \t].*)?$/);
+    if (!match) return null;
+    var first = milliseconds(match[1]);
+    var last = milliseconds(match[2]);
+    if (first == null || last == null) {
+      return clockLike(match[1]) || clockLike(match[2]) ? { valid: false } : null;
+    }
+    return { start: first, end: last, valid: last > first };
+  }
+
+  // 以时间轴行为锚点分块，而不是按空行切块：破损字幕常缺块间空行，
+  // 按空行切会把下一条的时间轴当正文显示出来。
+  // 没有时间轴的行（序号、正文）先攒在 pending 里，遇到下一条时间轴时
+  // 把第一段（空行之前的部分）补进上一块正文；空行之后/坏块之后的残留丢弃。
   function parseTimed(text, type) {
     if (type === "vtt") {
       if (!/^WEBVTT(?:[ \t].*)?(?:\n|$)/.test(text)) throw new Error("Invalid WebVTT header");
@@ -83,18 +110,43 @@
       text = headerEnd < 0 ? "" : text.slice(headerEnd + 2);
     }
     var output = [];
-    text.split(/\n[ \t]*\n/).forEach(function (block) {
-      var lines = block.trim().split("\n");
-      if (!lines[0]) return;
-      if (type === "vtt" && /^(?:NOTE(?:[ \t]|$)|STYLE$|REGION$)/.test(lines[0])) return;
-      var timingIndex = lines[0].indexOf("-->") >= 0 ? 0 : 1;
-      var timing = lines[timingIndex] || "";
-      var match = timing.match(/^\s*(\S+)\s+-->\s+(\S+)(?:[ \t].*)?$/);
-      if (!match) throw new Error("Invalid subtitle cue block");
-      var entry = cue(match[1], match[2], lines.slice(timingIndex + 1).join("\n").replace(/\{[^}]*\}/g, ""));
-      if (entry) output.push(entry);
+    var current = null;
+    var pending = [];
+    var skipping = false;
+
+    function flush(stripIndex) {
+      if (!pending.length) return;
+      var lines = pending;
+      pending = [];
+      if (!current) return;
+      var cut = lines.length;
+      for (var index = 0; index < lines.length; index++) {
+        if (!lines[index].trim()) { cut = index; break; }
+      }
+      lines = lines.slice(0, cut);
+      // 缺空行时上一块正文末尾会粘着下一条的序号，只在后面确实还有时间轴时剥掉。
+      if (stripIndex) {
+        while (lines.length > 1 && /^\d+$/.test(lines[lines.length - 1].trim())) lines.pop();
+      }
+      var body = lines.join("\n").replace(/\{[^}]*\}/g, "");
+      if (body.trim()) current.text.push(body);
+    }
+
+    text.split("\n").forEach(function (line) {
+      var trimmed = line.trim();
+      if (type === "vtt" && /^(?:NOTE(?:[ \t]|$)|STYLE$|REGION$)/.test(trimmed)) { skipping = true; return; }
+      if (skipping) { if (!trimmed) skipping = false; return; }
+      var timing = classifyTiming(trimmed);
+      if (!timing) { pending.push(line); return; }
+      flush(true);
+      current = timing.valid ? { start: timing.start, end: timing.end, text: [] } : null;
+      if (current) output.push(current);
     });
-    return output;
+    flush(false);
+
+    return output.map(function (entry) {
+      return makeCue(entry.start, entry.end, entry.text.join("\n"));
+    }).filter(Boolean);
   }
 
   function assText(text) {

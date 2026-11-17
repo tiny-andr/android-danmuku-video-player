@@ -30,3 +30,5 @@ tmp/
 # 本地交接笔记与一次性临时文件
 old-HANDOFF.md
 .tmp-*
+
+bplayer-android/src-tauri/gen/schemas/

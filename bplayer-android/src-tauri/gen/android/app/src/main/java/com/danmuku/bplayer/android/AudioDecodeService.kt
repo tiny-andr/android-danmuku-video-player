@@ -31,6 +31,19 @@ internal object AudioWorkerProtocol {
   const val PROGRESS = 10
   const val DONE = 11
   const val ERROR = 12
+
+  /**
+   * 拼接阶段（裁 ADTS 段 + concat 重封装）。编码全部结束、进度已停在 99.9% 之后才发：
+   * 复用 PROGRESS 会让前端继续按「转换中 N%」刷新（速率/ETA 也开始乱跳），所以单列一个消息类型。
+   * payload: `stage`（见 [AudioAssembling]）+ `frames`（该阶段涉及/保留的 AAC 帧数，仅供诊断）。
+   */
+  const val ASSEMBLING = 13
+}
+
+/** [AudioWorkerProtocol.ASSEMBLING] 的 `stage` 取值。 */
+internal object AudioAssembling {
+  const val TRIM = "trim"       // 帧级裁剪（纯字节，工作线程）
+  const val CONCAT = "concat"   // concat: 拼接 + 一次 -c copy 重封装成 mka
 }
 
 /**
@@ -460,6 +473,9 @@ class AudioDecodeService : Service() {
     val executor = job.executor
     if (executor == null) { fail(job, "音轨转换未能启动"); return }
     job.assembling = true
+    // 所有段都已编码完成，进度停在 99.9%；从这里到重封装结束还要裁剪 + 拼接 + 封装，
+    // 先告诉宿主已进入拼接阶段，前端把胶囊换成「正在拼接音频…」而不是一直挂着 100%。
+    announceAssembling(job, AudioAssembling.TRIM, job.segments.sumOf { it.needFrames })
     try {
       executor.execute {
         val error = trimSegments(job)
@@ -467,6 +483,7 @@ class AudioDecodeService : Service() {
           if (!current(job)) { if (active === job && job.retiring) { job.assembling = false; release(job) }; return@post }
           job.assembling = false
           if (error != null) { fail(job, error); return@post }
+          announceAssembling(job, AudioAssembling.CONCAT, job.segments.sumOf { it.keptFrames })
           event(job, AudioWorkerProtocol.PROGRESS, Bundle().apply { putDouble("percent", 99.9); putLong("written", job.written) })
           repackage(job)
         }
@@ -611,6 +628,11 @@ class AudioDecodeService : Service() {
     if (!current(job)) return
     data.putString("jobId", job.id)
     try { job.client.send(Message.obtain(null, type).apply { this.data = data }) } catch (_: Exception) { cancel(job) }
+  }
+
+  /** 拼接阶段的分阶段通知：只在任务仍有效时发，客户端已死时沿用 [event] 的取消语义。 */
+  private fun announceAssembling(job: Job, stage: String, frames: Long) {
+    event(job, AudioWorkerProtocol.ASSEMBLING, Bundle().apply { putString("stage", stage); putLong("frames", frames) })
   }
 
   private fun complete(job: Job, result: String) {

@@ -154,10 +154,14 @@ internal class AndroidAudioNative(context: Context, private val webView: WebView
               putInt("audioIndex", permit.audioIndex)
               putLong("durationUs", permit.duration?.let { (it * 1_000_000).toLong() } ?: 0L)
               putString("tags", AudioMedia.tags(permit.identity, permit.audioIndex, permit.offset).toString())
-            }, cancellation) { progress ->
+            }, cancellation, progress = { progress ->
               event("progress", permit, JSONObject().put("percent", progress.getDouble("percent", -1.0))
                 .put("written", progress.getLong("written", 0)))
-            }
+            }, assembling = { stage ->
+              // 拼接阶段（裁段 / concat 重封装）没有百分比，单列事件让前端把胶囊换成「正在拼接音频…」。
+              event("assembling", permit, JSONObject().put("stage", stage.getString("stage") ?: "")
+                .put("frames", stage.getLong("frames", 0L)))
+            })
             if (File(result.getString("path")).canonicalFile != output || !output.isFile) throw NetworkFailure("音轨服务返回了无效缓存路径")
             val validation = AudioMedia.validCache(result.getJSONObject("probe"), permit.identity, permit.audioIndex,
               permit.duration, permit.stat.modifiedMs, output.lastModified(), permit.exactDuration)

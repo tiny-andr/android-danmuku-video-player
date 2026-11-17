@@ -55,7 +55,7 @@
       else settle(id, null, envelope.result);
     };
     var event = function (name, payload) {
-      if (disposed || !payload || !["progress", "done", "error", "cancelled"].includes(name)) return;
+      if (disposed || !payload || !["progress", "assembling", "done", "error", "cancelled"].includes(name)) return;
       Array.from(subscribers).forEach(function (subscriber) { try { subscriber(name, payload); } catch (error) {} });
     };
     environment.__aAudioReply = reply; environment.__aAudioEvent = event;
@@ -174,9 +174,12 @@
     }
     var unsubscribe = tasks.subscribe(function (event, payload) {
       if (!state || payload.session !== state.session || payload.video !== state.video || payload.jobId !== state.jobId || payload.audioIndex !== state.selectedIndex) return;
+      // 拼接阶段（裁段 + concat 重封装）的 phase 仍是 running：编码会话都已结束，但任务没有终态，
+      // 所以这条事件能穿过上面的 phase 过滤，也不会走下面的 done 分支把胶囊提前收掉。
       if (!["starting", "running"].includes(state.phase)) return;
       var owner = { session: state.session, generation: state.generation, video: state.video, audioIndex: state.selectedIndex };
       if (event === "progress") { emit("progress", payload); return; }
+      if (event === "assembling") { emit("assembling", payload); return; }
       if (event === "done") {
         state.phase = "completed";
         if (!payload.path) { state.phase = "error"; emit("error", "音轨任务完成但未返回可播放缓存"); return; }

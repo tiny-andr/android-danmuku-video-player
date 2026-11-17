@@ -22,7 +22,7 @@ internal class AudioWorkerClient(context: Context) : Closeable {
   private val connected = CountDownLatch(1)
   private data class Pending(val latch: CountDownLatch = CountDownLatch(1),
     @Volatile var result: String? = null, @Volatile var error: String? = null,
-    val progress: (Bundle) -> Unit)
+    val progress: (Bundle) -> Unit, val assembling: (Bundle) -> Unit = {})
   private val pending = ConcurrentHashMap<String, Pending>()
   @Volatile private var service: Messenger? = null
   @Volatile private var closed = false
@@ -32,6 +32,7 @@ internal class AudioWorkerClient(context: Context) : Closeable {
     val request = pending[id] ?: return@Handler true
     when (message.what) {
       AudioWorkerProtocol.PROGRESS -> request.progress(message.data)
+      AudioWorkerProtocol.ASSEMBLING -> request.assembling(message.data)
       AudioWorkerProtocol.DONE -> { request.result = message.data.getString("result") ?: "{}"; request.latch.countDown() }
       AudioWorkerProtocol.ERROR -> { request.error = message.data.getString("message") ?: "音轨处理失败"; request.latch.countDown() }
     }
@@ -68,13 +69,13 @@ internal class AudioWorkerClient(context: Context) : Closeable {
   }
 
   fun call(command: Int, id: String, args: Bundle, cancellation: AudioCancellation,
-    progress: (Bundle) -> Unit = {}): JSONObject {
+    progress: (Bundle) -> Unit = {}, assembling: (Bundle) -> Unit = {}): JSONObject {
     cancellation.check()
     if (!connected.await(10, TimeUnit.SECONDS) || closed || service == null) {
       close()
       throw NetworkFailure("原生音轨服务未能启动")
     }
-    val request = Pending(progress = progress)
+    val request = Pending(progress = progress, assembling = assembling)
     if (pending.putIfAbsent(id, request) != null) throw NetworkFailure("音轨任务标识重复")
     try {
       args.putString("jobId", id)

@@ -1681,8 +1681,14 @@
           audioStatus('默认音轨需要兼容处理，自动转换已关闭。可点击音轨' + (selection.audioIndex + 1) + ' 手动处理；原轨保持静音，避免误播其它语言。', false);
         },
         progress: function (progress) {
+          // 拼接阶段内核仍会推 99.9% 的 progress；忽略掉，否则胶囊又从「正在拼接音频…」
+          // 跳回「转换中 100%」，速率/ETA 也跟着抖。拼接结束走 ready/error 收尾。
+          if (audioPillState.assembling) return;
           updateAudioPill(Number(progress.percent), Number(progress.written) || 0);
           audioStatus('正在处理选中的音轨…' + (progress.percent >= 0 ? ' ' + Math.round(progress.percent) + '%' : ''), true);
+        },
+        assembling: function (stage) {
+          showAudioAssembling(stage && stage.stage);
         },
         error: function (message) {
           clearAudioPill();
@@ -2276,7 +2282,7 @@
     // 按实测序列（ETA 在 6:32–12:05 之间来回）估算，EMA 后落在约 8:20–10:20。
     var PILL_SPEED_SMOOTH = 0.35;
     var PILL_ETA_SMOOTH = 0.4;
-    var audioPillState = { percent: -1, written: 0, speed: 0, eta: -1, samples: [], lastWritten: 0 };
+    var audioPillState = { percent: -1, written: 0, speed: 0, eta: -1, samples: [], lastWritten: 0, assembling: false };
 
     function fmtSpeed(bytesPerSecond) {
       if (!isFinite(bytesPerSecond) || bytesPerSecond <= 0) return '';
@@ -2291,6 +2297,9 @@
     }
     function audioPillText() {
       var st = audioPillState;
+      // 拼接阶段（裁段 + concat 重封装）没有可用的分比：编码已全部结束，进度停在 99.9%。
+      // 这时整句换掉，别让用户对着不动的「100%」等十几秒以为卡死。
+      if (st.assembling) return '⏳ 正在拼接音频…';
       // percent < 0：ffmpeg 还没吐出第一份统计（或总时长未知）。文案直接写「音轨转换中」，
       // 用户才知道现在没声音是在等转码、要等多久，而不是播放器坏了。
       if (!(st.percent >= 0)) return '⏳ 音轨转换中…';
@@ -2311,6 +2320,7 @@
       audioPillJob = false;
       audioPillState.percent = -1; audioPillState.written = 0; audioPillState.speed = 0;
       audioPillState.eta = -1; audioPillState.samples = []; audioPillState.lastWritten = 0;
+      audioPillState.assembling = false;
       syncPills();
     }
     function clearSubPill() { subPillKind = ''; syncPills(); }
@@ -2345,6 +2355,7 @@
       audioPillJob = true; // 转码一开始就亮，别等第一个带百分比的回调
       if (!isFinite(value) || value < 0) {
         st.percent = -1; st.written = 0; st.speed = 0; st.eta = -1; st.samples = []; st.lastWritten = 0;
+        st.assembling = false; // 新一轮任务（percent<0）从「转换中」重新开始
       } else {
         audioPillSample(bytes, Date.now());
         st.percent = value;
@@ -2362,6 +2373,18 @@
       }
       pillEls.audio.textContent = audioPillText();
       syncPills();
+    }
+    // 拼接阶段（裁 ADTS 段 → concat 重封装）：没有百分比，胶囊整句换成「正在拼接音频…」，
+    // 并清掉速率/ETA 的滑动窗口，避免拼完前还显示转换期的旧读数。胶囊本体保持可见，
+    // 点它仍然是 cancelAudioWork（取消全部会话 + 删 staging + 不发布）。
+    function showAudioAssembling(stage) {
+      var st = audioPillState;
+      audioPillJob = true;
+      st.assembling = true;
+      st.percent = -1; st.written = 0; st.speed = 0; st.eta = -1; st.samples = []; st.lastWritten = 0;
+      pillEls.audio.textContent = audioPillText();
+      syncPills();
+      audioStatus(stage === 'concat' ? '正在拼接音频，完成后自动挂载…' : '正在裁剪音频分段…', true);
     }
     function updateSubPill(kind) {
       subPillKind = kind === 'pgs' ? 'pgs' : 'extract';
