@@ -161,6 +161,10 @@
         state.tracks = (probe.tracks || []).filter(function (track) { return track.kind === "audio"; });
         state.phase = "idle"; emit("probe", { tracks: state.tracks.slice(), allTracks: probe.tracks || [], duration_us: probe.duration_us || null });
         if (!state.tracks.length) return;
+        // 用户在探测返回之前就手动点了音轨：这里不能再发起自动选择。select() 第一行会
+        // cancelSelection()，把用户刚启动的那单连 jobId 一起取消，进度胶囊随之消失，
+        // 用户看到的是「处理中一闪就没了」。
+        if (state.selectedIndex >= 0) return;
         var selected = state.tracks.findIndex(function (track) { return !!track.default; }); if (selected < 0) selected = 0;
         if (selected !== 0 || codec(state.tracks[selected].codec).needsConversion) await select(selected, false);
       } catch (error) {

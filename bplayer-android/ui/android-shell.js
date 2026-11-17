@@ -211,12 +211,12 @@
    * 文件浏览器
    * ------------------------------------------------------------------ */
   function showStorageError(error) {
-    var toast = document.getElementById("toast");
-    if (!toast) return;
-    var text = document.getElementById("toastText");
-    if (text) text.textContent = "读取失败：" + (error.message || String(error));
-    toast.classList.add("show");
-    setTimeout(function () { toast.classList.remove("show"); }, 6000);
+    // 提示栈在 index.html 里（window.__aToast），这里只借它的接口：旧的 #toast/#toastText
+    // 单节点已换成栈，壳层直接改 DOM 会和栈里排队的提示打架（覆盖队首文本并重置计时）。
+    var message = "读取失败：" + (error && error.message ? error.message : String(error));
+    if (window.__aToast) { window.__aToast(message, 6000); return; }
+    // index.html 还没执行完（启动早期）时兜底：console 里留痕，不要静默吞掉
+    if (window.console && console.warn) console.warn(message);
   }
 
   function openBrowser(m) {
@@ -436,7 +436,8 @@
       '<div class="mBody">' +
         '<div class="mLeft">' +
           '<div class="mBrand"><div class="mLogo">▶</div>' +
-            '<div><h1>Bplayer</h1><p>本地视频 · 弹幕播放器</p></div>' +
+            // 版本占位：Android 没有窗口标题，版本挂在首页副标题后；具体值由 renderAppVersion() 填
+            '<div><h1>Bplayer</h1><p>本地视频 · 弹幕播放器<span id="mAppVersion"> · 版本 —</span></p></div>' +
             '<button type="button" class="mHomeGear" id="mHomeSettings" title="设置">⚙</button></div>' +
           '<div class="mActions">' +
             '<button type="button" id="mOpenVideo" class="mBtn mPrimary">' +
@@ -490,6 +491,44 @@
       renderRecent();
     });
     renderRecent();
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 首页版本号
+   * 版本唯一来源是 index.html 侧的全局契约（从 Tauri 读 Cargo 包版本）：
+   * window.__BplayerAppVersion 是字符串，事件 bplayer:appversion 的 detail 也是版本字符串。
+   * 这里只读全局值 + 监听事件，不自己 invoke Rust，避免两处各取一份、版本对不上。
+   * ------------------------------------------------------------------ */
+  var APP_VERSION_EVENT = "bplayer:appversion";
+  var appVersionSeen = ""; // 事件先于首页构建到达时的暂存值
+
+  // 版本字符串归一化：只接受非空字符串，去掉首尾空白与可能自带的 "v" 前缀；
+  // 非字符串 / "undefined" / "null" 一律当未知，避免界面上出现 undefined。
+  function normalizeAppVersion(value) {
+    if (typeof value !== "string") return "";
+    var text = value.trim();
+    if (!text || text === "undefined" || text === "null") return "";
+    return text.replace(/^v/i, "");
+  }
+
+  function renderAppVersion(value) {
+    var version = normalizeAppVersion(value);
+    if (version) appVersionSeen = version;
+    // 元素是 buildHome() 用 innerHTML 建出来的，调用点可能早于构建（或页面在别的覆盖层），
+    // 找不到就静默返回，等下一次事件 / boot 时再渲染。
+    var node = document.getElementById("mAppVersion");
+    if (!node) return false;
+    var text = appVersionSeen || normalizeAppVersion(window.__BplayerAppVersion);
+    // 已知：· v0.1.0；未知：· 版本 —（继承副标题的小字颜色，不额外抢眼）
+    node.textContent = text ? " · v" + text : " · 版本 —";
+    return true;
+  }
+
+  function bindAppVersion() {
+    window.addEventListener(APP_VERSION_EVENT, function (event) {
+      renderAppVersion(event && event.detail);
+    });
+    renderAppVersion();
   }
 
   /* ------------------------------------------------------------------ *
@@ -983,6 +1022,7 @@
 
   function boot() {
     buildHome();
+    bindAppVersion(); // 首页已构建：先按全局值渲染一次，再监听后续到达的版本事件
     buildTopbar();
     ["audioPanel", "subtitlePanel", "danmakuPanel", "densityPanel", "blockPanel", "settingsMask"].forEach(function (id) {
       navigation.register(id, function () { document.getElementById(id).hidden = false; }, function () { document.getElementById(id).hidden = true; });

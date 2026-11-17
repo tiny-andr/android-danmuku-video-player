@@ -17,9 +17,16 @@
   var prompt = null;
   var notice = null;
   var noticeTimer = null;
+  var resumeTimer = null;
+  var resumeRemaining = 0;
   var storage = null;
   try { storage = window.localStorage; } catch (error) {}
   var store = window.AndroidResumeStore.create(storage);
+
+  // 续播卡的「自动继续」倒计时（秒）。为什么是 3 秒：手机用户看到续播卡后的决策窗口很短，
+  // 想「从头播放」的人 3 秒内足够点到；再长卡片就只是挡着画面、用户还会忘了它开着。
+  // 以后要改只动这一处（按整秒显示，计时器每秒一跳）。
+  var RESUME_COUNTDOWN_SEC = 3;
 
   function node(tag, cls, text) {
     var element = document.createElement(tag);
@@ -72,7 +79,10 @@
     var choices = node("div"); choices.id = "mResumeActions";
     choices.appendChild(button("从头播放", "mResumeRestart", function () { chooseResume(false); }));
     choices.appendChild(button("继续播放", "mResumeContinue", function () { chooseResume(true); }));
-    choices.appendChild(button("取消", "mResumeCancel", function () { if (window.AndroidPlayback) window.AndroidPlayback.exit(); }));
+    choices.appendChild(button("取消", "mResumeCancel", function () {
+      stopResumeCountdown(); // 点任何按钮都立刻停表，不能再在用户离开后被自动继续
+      if (window.AndroidPlayback) window.AndroidPlayback.exit();
+    }));
     card.append(heading, name, position, choices); prompt.appendChild(card); document.body.appendChild(prompt);
     notice = node("div"); notice.id = "mPlaybackNotice"; notice.hidden = true; notice.setAttribute("role", "status"); document.body.appendChild(notice);
     document.addEventListener("visibilitychange", function () { if (document.hidden) pauseFor("background"); });
@@ -96,11 +106,41 @@
     if (video.readyState >= 1 && !video.seeking) store.save(path, video.currentTime, video.duration);
   }
   function hideResume() {
+    stopResumeCountdown(); // 统一在这里停表并复位按钮文案：换片 begin()/退出 finish()/选完 chooseResume() 都走这里
     pendingResume = null; if (prompt) prompt.hidden = true;
     document.body.classList.remove("m-resume-choice");
   }
+  function resumeContinueButton() { return document.getElementById("mResumeContinue"); }
+  function paintResumeCountdown() {
+    var control = resumeContinueButton();
+    if (control) control.textContent = resumeRemaining > 0 ? "继续播放（" + resumeRemaining + "）" : "继续播放";
+  }
+  function stopResumeCountdown() {
+    if (resumeTimer !== null) { clearTimeout(resumeTimer); resumeTimer = null; }
+    resumeRemaining = 0;
+    paintResumeCountdown();
+  }
+  function tickResumeCountdown() {
+    resumeTimer = null;
+    if (!pendingResume) return; // 卡片已被收起：兜底，不再自动继续
+    resumeRemaining -= 1;
+    if (resumeRemaining > 0) {
+      paintResumeCountdown();
+      resumeTimer = setTimeout(tickResumeCountdown, 1000);
+      return;
+    }
+    // 先停表再执行「继续播放」：chooseResume 会同步调用 hideResume，那里再清一次是无害的重入
+    stopResumeCountdown();
+    chooseResume(true);
+  }
+  function startResumeCountdown() {
+    stopResumeCountdown();
+    resumeRemaining = Math.max(1, Math.ceil(RESUME_COUNTDOWN_SEC));
+    paintResumeCountdown();
+    resumeTimer = setTimeout(tickResumeCountdown, 1000);
+  }
   function begin(nextPath) {
-    ensure(); savePosition(); abandonFocus(); unlock(false); hideResume();
+    ensure(); savePosition(); abandonFocus(); unlock(false); hideResume(); // hideResume 顺带清掉上一部片的续播倒计时
     path = nextPath; ready = false; lastSave = 0; fit = "contain"; playAllowed = true;
     decisionMade = !store.get(path);
     actions.classList.remove("show"); setFit("contain", true);
@@ -108,7 +148,8 @@
   }
   function finish() {
     savePosition(); abandonFocus(); ready = false; path = ""; decisionMade = true; playAllowed = false;
-    hideResume(); unlock(false); if (actions) actions.classList.remove("show");
+    hideResume(); // 退出播放后旧倒计时不能再把下一部片的续播卡点掉
+    unlock(false); if (actions) actions.classList.remove("show");
     clearTimeout(noticeTimer); if (notice) notice.hidden = true;
   }
   function chooseResume(resume) {
@@ -131,6 +172,7 @@
         document.getElementById("mResumeName").textContent = path.split("/").pop();
         document.getElementById("mResumePosition").textContent = "上次看到 " + time(saved.position) + " / " + time(owner.video.duration);
         prompt.hidden = false; document.body.classList.add("m-resume-choice");
+        startResumeCountdown(); // 3 秒内不操作就当用户选择继续看（视频此刻是 pause 的，必须真的 play 起来）
         onControls(false); return;
       }
       decisionMade = true;
