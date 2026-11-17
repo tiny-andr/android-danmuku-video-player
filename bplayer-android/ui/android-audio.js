@@ -92,13 +92,18 @@
   // 改成白名单后，拿不准的一律走转换：最差多转一次，不会静音。
   // AC-3/E-AC-3 桌面内核能解、安卓 WebView 不能解，所以都留在名单外按需要转换处理。
   var NATIVE_AUDIO = ["A_AAC", "AAC", "A_MPEG/L3", "MP3", "A_OPUS", "OPUS", "A_VORBIS", "VORBIS", "A_FLAC", "FLAC"];
+  // 内核 <video> 解不了、但 <audio> 直连 mka 可能解得开的编码：真机实测 E-AC-3 5.1 能出
+  // 声（平台杜比解码器）。这类轨先试 -c copy 抽 mka 直出，保住 5.1；设备解不了再回退 AAC。
+  var REMUX_AUDIO = ["A_AC3", "AC3", "AC-3", "A_EAC3", "EAC3", "E-AC-3"];
+  function remuxBlocked() { try { return localStorage.getItem("bplayer_remux_unsupported") === "1"; } catch (error) { return false; } }
   function codec(value) {
     var name = String(value || "").toUpperCase();
     var dead = name.indexOf("A_DTS") === 0 || ["DTS", "DCA", "TRUEHD", "A_TRUEHD", "PCM_BLURAY", "A_PCM/BLURAY", "AC4", "AC-4", "A_AC4", "A_DRA", "DRA"].includes(name);
     var native = NATIVE_AUDIO.includes(name);
     // 这里曾经还有一个 unreliable 字段（AC-3/E-AC-3），但没有任何地方消费它；
     // 「解码不可靠、可能无声」那条提示已按用户要求去掉，字段一并删掉免得误导。
-    return { dead: dead, native: native, needsConversion: !native };
+    var remux = REMUX_AUDIO.includes(name) && !remuxBlocked();
+    return { dead: dead, native: native, remux: remux, needsConversion: !native };
   }
 
   function createSession(tasks, hooks) {
@@ -129,6 +134,14 @@
           valid: function () { return owns(owner); }, session: owner.session, generation: owner.generation,
           onError: function (error) {
             if (!owns(owner) || state.phase === "error") return;
+            // copy 出来的轨在这台设备上放不出声：记下来，以后同类编码直接转 AAC，
+            // 别让用户每次都撞一次失败。
+            if (state.expectCopy) {
+              try {
+                localStorage.setItem("bplayer_remux_unsupported", "1");
+                localStorage.setItem("bplayer_remux_error", String((error && error.message) || error));
+              } catch (failure) { }
+            }
             state.phase = "error"; state.activeIndex = -1; emit("resetTrack"); emit("error", error.message || String(error));
           } });
         if (!owns(owner)) return;
@@ -146,10 +159,15 @@
       try {
         emit("isolate"); emit("selecting", audioIndex);
         // 探测结果里已经有时长和 PTS 起点，带上它们，prepare 就不用再跑一次 ffprobe
+        // AC-3/E-AC-3 先试 copy 抽轨（保住 5.1）；prepare 时就把意图带给原生，
+        // 免得多跑一次 ffprobe。
+        var track = state.tracks[audioIndex];
+        var wantCopy = !!(track && codec(track.codec).remux);
         var prepared = await tasks.request("audio_prepare", {
           videoPath: owner.video, audioIndex: audioIndex, session: owner.session,
           durationUs: state.probe && state.probe.duration_us ? state.probe.duration_us : 0,
-          offsetSecs: probeOffset(state.probe, audioIndex)
+          offsetSecs: probeOffset(state.probe, audioIndex),
+          copyAudio: wantCopy
         });
         if (!owns(owner)) return;
         if (!prepared || typeof prepared.jobId !== "string" || typeof prepared.target !== "string") throw new Error("音轨缓存准备结果无效");
@@ -160,6 +178,15 @@
           emit("disabled", { audioIndex: audioIndex }); return;
         }
         state.phase = "starting"; emit("progress", { percent: -1, written: 0 });
+        // copy 抽轨：产物是原始编码（AC-3 5.1），等整段抽完直接挂载。不能走流式——
+        // 流式固定编 AAC 2ch，用它就等于把要保住的 5.1 又压成立体声了。
+        state.expectCopy = wantCopy;
+        if (wantCopy) {
+          await tasks.request("audio_start", { jobId: prepared.jobId, session: owner.session });
+          if (!owns(owner)) return;
+          if (state.phase === "starting") state.phase = "running";
+          return;
+        }
         // 流式接管：边转边播（MSE），不用等整条音轨转完。失败就原样退回下面的整段转码，
         // 那条链路和缓存复用都保持不变，流式只是「先出声」的加速路径。
         // 进来先停掉上一路：换轨时旧流的 ffmpeg 和增长文件都必须立刻收掉。

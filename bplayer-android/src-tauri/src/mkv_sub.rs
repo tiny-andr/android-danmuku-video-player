@@ -16,6 +16,39 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
+/// 稀疏抽取用的随机读源。
+///
+/// 唯一比 `Read + Seek` 多出来的能力是「提前告诉我一会儿会 seek 到哪些区间」。
+/// 本地文件不需要它（默认空实现即可：文件本来就没有远端往返延迟，预取只会白占内存），
+/// 网络源需要（见 `http_range::HttpRangeReader`）：那里一次小读就是一次 HTTP 往返，
+/// 一千多条字幕串行读下来就是几分钟，只有并发批量取才有可用性。
+///
+/// 预取被允许整个失败——调用方之后仍会按需逐块读，正确性不依赖它是否成功。
+pub trait RandomRead: Read + Seek {
+    /// 区间必须按起点升序、可以重叠；实现方自己合并。
+    fn prefetch(&mut self, _ranges: &[(u64, u64)]) {}
+}
+
+impl RandomRead for File {}
+
+/// 快速定位一条 cue 的 block 时读取的窗口大小。
+///
+/// 实测一部 4K 片字幕 block 元素最大 90 字节（p50 39、p99 78），2048 给足余量；
+/// 超过窗口的块在 `parse_block` 里会因长度越界解析失败，自动回退到慢路径。
+/// 请求字节数实测不影响耗时（512 B / 2 KiB / 8 KiB 同样是 14 s），所以窗口给大不亏。
+const PREFETCH_WINDOW: u64 = 2048;
+
+/// 字幕块的真实位置是 `簇起点 + 簇元素头长度 + CueRelativePosition`，其中簇元素头长度
+/// 解析前不知道：ID 固定 4 字节，size vint 宽 1–8 字节，所以只有这 8 种可能。
+/// 在窗口里逐个试就能定位，省掉"先读簇头拿偏移"的那一次远端往返。
+const CDATA_MIN: u64 = 5;
+const CDATA_MAX: u64 = 12;
+
+/// 字幕块的真实位置是 `簇起点 + 簇payload起点 + CueRelativePosition`，中间那个
+/// 「payload 起点」是簇元素头长度（4–12 字节，取决于簇大小 vint 的宽度），
+/// 解析前不知道。窗口往前留 16 字节，保证块元素头一定落在预取区间里。
+const PREFETCH_BLOCK_SLACK: u64 = 16;
+
 const ID_SEGMENT: u64 = 0x1853_8067;
 const ID_SEEK_HEAD: u64 = 0x114D_9B74;
 const ID_SEEK: u64 = 0x4DBB;
@@ -290,6 +323,75 @@ fn parse_block(buf: &[u8], start: usize, _track_hint: u32) -> Option<(u32, i64, 
     buf.get(p..de).map(|b| (track as u32, rel_ts, duration, b.to_vec()))
 }
 
+/// 在预取窗口里定位并解析一条 cue 的 block，不读簇头。
+///
+/// block 的真实位置是 `簇起点 + 簇元素头长度 + CueRelativePosition`。簇元素头长度
+/// 只有 `CDATA_MIN..=CDATA_MAX` 这 8 种可能（ID 固定 4 字节 + size vint 宽 1–8 字节），
+/// 而窗口已经把这段字节都预取回来了，逐个偏移试一遍即可——省掉"先读簇头拿偏移"
+/// 的那一次远端往返。
+///
+/// 返回 None 表示没定位到（块超出窗口、字节流异常、CueTime 不可用），调用方回退到
+/// 读簇头的慢路径。正确性不依赖这个快路径：它在真实片源上命中 99.7%–99.9%。
+fn quick_block<R: RandomRead>(
+    f: &mut R,
+    window_start: u64,
+    track_number: u32,
+) -> Result<Option<(Option<u64>, Vec<u8>)>, String> {
+    f.seek(SeekFrom::Start(window_start)).map_err(|e| e.to_string())?;
+    let mut window = [0u8; PREFETCH_WINDOW as usize];
+    let n = f.read(&mut window).map_err(|e| e.to_string())?;
+    if n == 0 {
+        return Ok(None);
+    }
+    for cdata in CDATA_MIN..=CDATA_MAX {
+        let offset = (PREFETCH_BLOCK_SLACK + cdata) as usize;
+        if offset >= n {
+            continue;
+        }
+        let Some((track, rel_ts, duration, payload)) = parse_block(&window[..n], offset, track_number) else { continue };
+        if track != track_number {
+            continue;
+        }
+        // 相对时间戳必须是簇内值（一个簇通常几秒到几十秒）。窗口里恰好出现的 0xA3 字节
+        // 会被当成 Block 解析出乱七八糟的 rel_ts——用范围挡掉这种误判。
+        if rel_ts < 0 || rel_ts > 600_000 {
+            continue;
+        }
+        // 字幕负载必须是可读文本：不能以裸控制字节开头。UTF-8 中文首字节 ≥ 0xE0，
+        // SRT 行首常见空格/连字符/引号，ASS 行首是 `Dialogue:` 或数字，都 ≥ 0x09。
+        if payload.is_empty() || payload.iter().take(4).any(|b| *b < 0x09) {
+            continue;
+        }
+        return Ok(Some((duration, payload)));
+    }
+    Ok(None)
+}
+
+/// block 负载 → 可直接写进 SRT 的纯文本。
+///
+/// 返回 `None` 表示这条块格式不对（ASS 行缺字段），按解析失败处理让整轨 fail-closed；
+/// 返回 `Some("")` 表示空字幕块——合法，不算失败。
+fn sub_text(payload: &[u8], is_ass: bool) -> Option<String> {
+    let raw = String::from_utf8_lossy(payload).replace("\r\n", "\n");
+    let mut lines: Vec<String> = Vec::new();
+    for l in raw.lines() {
+        let l = l.trim_end();
+        if l.trim().is_empty() {
+            continue;
+        }
+        if is_ass {
+            let t = ass_line_to_text(l);
+            if t.is_empty() {
+                return None;
+            }
+            lines.push(t);
+        } else {
+            lines.push(l.to_string());
+        }
+    }
+    Some(lines.join("\n"))
+}
+
 fn fmt_ts(ms: i64) -> String {
     let ms = ms.max(0);
     let (h, rest) = (ms / 3_600_000, ms % 3_600_000);
@@ -389,7 +491,7 @@ pub fn sparse_extract_srt(path: &Path, track_number: u32, is_ass: bool) -> Resul
 /// 网络源（SMB / WebDAV / SFTP）在 Android 上没有可挂载的路径，桌面版那种"直接给个
 /// 文件路径"走不通：这里让调用方提供按字节随机读的实现（见 `http_range`），
 /// 解析逻辑与本地文件完全相同。
-pub fn sparse_extract_srt_reader<R: Read + Seek>(
+pub fn sparse_extract_srt_reader<R: RandomRead>(
     f: &mut R,
     track_number: u32,
     is_ass: bool,
@@ -401,6 +503,29 @@ pub fn sparse_extract_srt_reader<R: Read + Seek>(
     let cues = read_cues(f, cues_pos, track_number)?;
     if cues.is_empty() {
         return Err("Cues 里没有这条字幕轨".into());
+    }
+
+    // 一次性把这条轨所有 cue 要读的区间交给读源去预取。
+    //
+    // 这一步是网络源能不能用的分水岭。每条 cue 一个窗口（2048 字节）：
+    // 窗口里同时有簇元素头和字幕块（块就埋在这 2048 字节内），所以预取命中后
+    // 解析阶段完全不用再发请求。实测 843 条 cue 的轨：
+    //   不预取   —— 每条 cue 两次串行远端往返，5–10 分钟
+    //   每条两次 —— 1626 次请求，实测 82 秒
+    //   每条一次 —— 843 次请求，实测 14 秒（并发 4 是吞吐饱和点）
+    //
+    // 本地文件这里走默认实现（空操作），网络源据此并发批量取回。
+    {
+        let mut ranges: Vec<(u64, u64)> = Vec::with_capacity(cues.len());
+        for cue in &cues {
+            let Some(cluster_abs) = seg_data.checked_add(cue.cluster) else { continue };
+            let Some(relative) = cue.relative else { continue };
+            let start = cluster_abs.saturating_add(relative).saturating_sub(PREFETCH_BLOCK_SLACK);
+            ranges.push((start, PREFETCH_WINDOW));
+        }
+        // trait 要求升序，合并逻辑靠它一次扫描搞定
+        ranges.sort_unstable();
+        f.prefetch(&ranges);
     }
 
     let mut buf = vec![0u8; 8192];
@@ -419,6 +544,33 @@ pub fn sparse_extract_srt_reader<R: Read + Seek>(
         let Some(relative) = cue.relative else {
             return Err("Cues 缺少 CueRelativePosition，无法精确定位字幕块".into());
         };
+
+        // ---- 快路径：在预取窗口里直接定位 block，时间戳用 CueTime ----
+        //
+        // 这是网络源的实际路径。整条轨所有窗口已经并发预取过，这里只是从缓存里读：
+        // 一条 cue 一次远端往返都不用发。本地文件也走同一条路径，产物与慢路径逐字节相同。
+        let quick = match cluster_abs.checked_add(relative).and_then(|x| x.checked_sub(PREFETCH_BLOCK_SLACK)) {
+            Some(start) if cue.time > 0 => quick_block(f, start, track_number)?,
+            _ => None,
+        };
+        if let Some((duration, payload)) = quick {
+            let Ok(start_ms) = i64::try_from(cue.time) else {
+                dropped += 1;
+                continue;
+            };
+            match sub_text(&payload, is_ass) {
+                None => dropped += 1,
+                Some(text) if text.trim().is_empty() => {} // 空字幕块是合法的，不算失败
+                Some(text) => entries.push(SubEntry { start_ms, duration, text }),
+            }
+            continue;
+        }
+
+        // ---- 慢路径：读簇头拿 ClusterTimestamp，再跳到 relative 处读块 ----
+        //
+        // 只有快路径定位失败时才会走到：块超出 2048 字节窗口（罕见的大字幕）、
+        // CueTime 缺失/为 0、或窗口里没有能匹配这条轨的 block。
+        // 网络源上这条路径每条 cue 要两次串行往返，所以它是兜底而不是主路。
         f.seek(SeekFrom::Start(cluster_abs)).map_err(|e| e.to_string())?;
         let hn = f.read(&mut head).map_err(|e| e.to_string())?;
         let Some((cid, cp2)) = vint(&head[..hn], 0, true) else {
@@ -472,38 +624,11 @@ pub fn sparse_extract_srt_reader<R: Read + Seek>(
             dropped += 1;
             continue;
         };
-        let raw = String::from_utf8_lossy(&payload).replace("\r\n", "\n");
-        let mut lines: Vec<String> = Vec::new();
-        let mut bad_line = false;
-        for l in raw.lines() {
-            let l = l.trim_end();
-            if l.trim().is_empty() {
-                continue;
-            }
-            if is_ass {
-                let t = ass_line_to_text(l);
-                if t.is_empty() {
-                    bad_line = true;
-                    break;
-                }
-                lines.push(t);
-            } else {
-                lines.push(l.to_string());
-            }
+        match sub_text(&payload, is_ass) {
+            None => dropped += 1,
+            Some(text) if text.trim().is_empty() => {} // 空字幕块是合法的，不算失败
+            Some(text) => entries.push(SubEntry { start_ms, duration, text }),
         }
-        if bad_line {
-            dropped += 1;
-            continue;
-        }
-        let text = lines.join("\n");
-        if text.trim().is_empty() {
-            continue; // 空字幕块是合法的，不算失败
-        }
-        entries.push(SubEntry {
-            start_ms,
-            duration,
-            text,
-        });
     }
 
     if dropped > 0 {

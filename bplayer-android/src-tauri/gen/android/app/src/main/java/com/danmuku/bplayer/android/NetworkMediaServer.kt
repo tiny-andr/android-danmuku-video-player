@@ -41,7 +41,11 @@ internal class NetworkMediaServer(
   private val maxReadBytes: Long? = null,
   private val sourceSnapshot: NetworkSource? = null,
   // 顺序播放要大的预读拉吞吐；字幕稀疏抽取这种跳读必须压小，否则每读一小块都白拉几 MiB
-  private val prefetchBytes: Int = DEFAULT_PREFETCH_BYTES
+  private val prefetchBytes: Int = DEFAULT_PREFETCH_BYTES,
+  // NanoHTTPD 的工作线程数。默认 8 是给播放/转码（同一时刻只有一两路请求）用的；
+  // 字幕稀疏抽取是靠「并发小读」才快得起来的，那个专用实例要更大的池，
+  // 否则十几个并发 Range 请求会被 SynchronousQueue 直接拒绝（它不排队）。
+  private val workerThreads: Int = 8
 ) : NanoHTTPD("127.0.0.1", 0) {
   private val bytesRead = java.util.concurrent.atomic.AtomicLong()
   private val token = ByteArray(32).also { SecureRandom().nextBytes(it) }
@@ -50,7 +54,7 @@ internal class NetworkMediaServer(
   // 每个 Range 请求原本都要走一次远端 stat；播放期间文件大小不会变，缓存几秒就能省掉
   // 每个请求一次 SMB 往返（局域网里几十毫秒）。
   private val statCache = ConcurrentHashMap<String, Pair<RemoteStat, Long>>()
-  private val runner = BoundedRunner()
+  private val runner = BoundedRunner(workerThreads)
 
   init { setAsyncRunner(runner); start(15000, true) }
 
@@ -189,9 +193,9 @@ internal class NetworkMediaServer(
     else -> "application/octet-stream"
   }
 
-  private class BoundedRunner : AsyncRunner {
+  private class BoundedRunner(maxThreads: Int) : AsyncRunner {
     private val clients = ConcurrentHashMap.newKeySet<ClientHandler>()
-    private val executor = ThreadPoolExecutor(0, 8, 30, TimeUnit.SECONDS,
+    private val executor = ThreadPoolExecutor(0, maxThreads, 30, TimeUnit.SECONDS,
       java.util.concurrent.SynchronousQueue(), { task -> Thread(task, "network-media").apply { isDaemon = true } })
     override fun exec(handler: ClientHandler) {
       clients.add(handler)

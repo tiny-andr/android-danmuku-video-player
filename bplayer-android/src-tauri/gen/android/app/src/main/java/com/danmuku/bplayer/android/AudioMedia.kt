@@ -57,8 +57,9 @@ internal object AudioMedia {
   fun validCache(probe: JSONObject, identity: String, audioIndex: Int, sourceDuration: Double?,
     sourceModified: Long?, cacheModified: Long?, exactDuration: Boolean = true): Pair<Boolean, Double>? {
     val streams = streams(probe)
-    if (streams.size != 1 || streams[0].optString("codec_type") != "audio" ||
-      streams[0].optString("codec_name") != "aac" || streams[0].optInt("channels") != 2) return null
+    // 不再限定 aac/2ch：copy 抽出的缓存保留原编码（AC-3 5.1 等），
+    // 只要求「单条音频流」，时长与 tags 的校验在后面兜底。
+    if (streams.size != 1 || streams[0].optString("codec_type") != "audio") return null
     val length = duration(probe) ?: return null
     if (length <= 0) return null
     if (sourceDuration != null) {
@@ -164,12 +165,13 @@ internal class AudioSourceAccess(context: Context, val path: String, private val
     return digest.digest().joinToString("") { "%02x".format(it) }
   }
 
-  fun input(candidate: String = path, probing: Boolean = false, prefetchBytes: Int = DEFAULT_PREFETCH_BYTES): String {
+  fun input(candidate: String = path, probing: Boolean = false, prefetchBytes: Int = DEFAULT_PREFETCH_BYTES,
+    workerThreads: Int = 8): String {
     cancellation.check(); checkConfiguration()
     if (!network) return File(candidate).canonicalPath
     val connections = NetworkConnections()
     val server = NetworkMediaServer(store!!, connections, NetworkRole.TRANSCODE, candidate,
-      if (probing) 32 * 1024 * 1024L else null, configuredSource, prefetchBytes)
+      if (probing) 32 * 1024 * 1024L else null, configuredSource, prefetchBytes, workerThreads)
     synchronized(proxies) { proxies.add(server to connections) }
     cancellation.onCancel { connections.close(); server.shutdown() }
     return server.mediaUrl(candidate)

@@ -28,7 +28,7 @@ internal class AndroidAudioNative(context: Context, private val webView: WebView
     { task -> Thread(task, "audio-task").apply { isDaemon = true } })
   private data class Task(val session: String, val cancellation: AudioCancellation)
   private data class Permit(val jobId: String, val session: String, val video: String, val audioIndex: Int,
-    val stat: RemoteStat, val identity: String, val offset: Double, val duration: Double?, val exactDuration: Boolean, val created: Long)
+    val stat: RemoteStat, val identity: String, val offset: Double, val duration: Double?, val exactDuration: Boolean, val created: Long, val copy: Boolean = false)
   private val tasks = ConcurrentHashMap<String, Task>()
   private val permits = ConcurrentHashMap<String, Permit>()
   private val streams = ConcurrentHashMap<String, StreamState>()
@@ -102,7 +102,7 @@ internal class AndroidAudioNative(context: Context, private val webView: WebView
                     source.unchanged(stat, identity)
                     permits.entries.removeIf { System.currentTimeMillis() - it.value.created > 120000 }
                     if (permits.size >= 16) throw NetworkFailure("待处理音轨任务过多，请重新打开影片")
-                    permits[jobId] = Permit(jobId, session, video, index, stat, identity, offset, duration, exact != null, System.currentTimeMillis())
+                    permits[jobId] = Permit(jobId, session, video, index, stat, identity, offset, duration, exact != null, System.currentTimeMillis(), args.optBoolean("copyAudio", false))
                     reply(id, true, JSONObject().put("jobId", jobId).put("target", target).put("cached", false).put("offset", offset))
                   }
                 }
@@ -168,9 +168,11 @@ internal class AndroidAudioNative(context: Context, private val webView: WebView
                 if (!video.startsWith("/@network/")) throw NetworkFailure("只有网络视频需要字幕读取器")
                 val source = AudioSourceAccess(context, video, cancellation)
                 try {
-                  // 字幕稀疏抽取是"跳着读小块"，预读必须压到 64 KiB：4 MiB 预读会让每次
-                  // 256 KiB 的 Range 请求白拉 4 MiB，正好把稀疏读的优势抵消干净。
-                  val url = source.input(video, prefetchBytes = 64 * 1024)
+                  // 字幕稀疏抽取是"跳着读小块"：Rust 侧预取窗口只有 2048 字节，预读放大到
+                  // 64 KiB 会让每次请求白拉 30 倍无用字节（实测把 65 秒拖成 82 秒）。
+                  // 16 KiB 是 PositionedNetworkStream 的下限，正好覆盖窗口 + 块头。
+                  // 工作池 8：Rust 侧并发预取实测在 4 路就饱和，多开只会占线程。
+                  val url = source.input(video, prefetchBytes = 16 * 1024, workerThreads = 8)
                   val stat = source.stat()
                   if (stat.kind != "file" || stat.size <= 0) throw NetworkFailure("视频不是有效文件")
                   readers[readerId] = source
@@ -232,6 +234,7 @@ internal class AndroidAudioNative(context: Context, private val webView: WebView
               putInt("audioIndex", permit.audioIndex)
               putLong("durationUs", permit.duration?.let { (it * 1_000_000).toLong() } ?: 0L)
               putString("tags", AudioMedia.tags(permit.identity, permit.audioIndex, permit.offset).toString())
+              putBoolean("copy", permit.copy)
             }, cancellation, progress = { progress ->
               event("progress", permit, JSONObject().put("percent", progress.getDouble("percent", -1.0))
                 .put("written", progress.getLong("written", 0)))
