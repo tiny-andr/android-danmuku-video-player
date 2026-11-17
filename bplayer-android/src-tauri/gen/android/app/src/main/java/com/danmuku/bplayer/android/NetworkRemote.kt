@@ -38,7 +38,7 @@ internal class PositionedNetworkStream(
   // NanoHTTPD 的 Response 每次只读 16 KiB（Response.BUFFER_SIZE）。如果直接把它转成 SMB 读，
   // 局域网每 16 KiB 就要往返一次，吞吐被锁在个位数 MB/s，4K 直读必然一直缓冲。
   // 这里自己预读 1 MiB，把远端读放大 64 倍，上层那 16 KiB 的循环基本都命中缓冲。
-  private val prefetch = ByteArray(1024 * 1024)
+  private val prefetch = ByteArray(4 * 1024 * 1024)
   private var prefetchStart = -1L
   private var prefetchLength = 0
   @Volatile private var closed = false

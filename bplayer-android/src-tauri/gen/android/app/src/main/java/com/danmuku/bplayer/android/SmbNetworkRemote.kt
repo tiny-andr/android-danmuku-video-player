@@ -135,19 +135,40 @@ internal class SmbNetworkRemote(private val source: NetworkSource, cancellation:
     }
   }
 
-  @Synchronized
-  override fun open(relative: String, start: Long, length: Long, total: Long): InputStream {
-    val file = share.openFile(checked(relative), setOf(AccessMask.FILE_READ_DATA, AccessMask.FILE_READ_ATTRIBUTES),
+  // 播放期间同一部片子会被反复 Range 请求，每个请求都 openFile 一次 CREATE 往返，
+  // 在局域网里就是几十毫秒的固定成本。这里复用同一个句柄（PositionedNetworkStream
+  // 按 position 读，不依赖文件指针），换文件/换大小才重新打开。
+  private var mediaFile: com.hierynomus.smbj.share.File? = null
+  private var mediaPath = ""
+  private var mediaSize = -1L
+
+  private fun mediaHandle(relative: String, total: Long): com.hierynomus.smbj.share.File {
+    val current = mediaFile
+    if (current != null && mediaPath == relative && mediaSize == total) return current
+    current?.let { runCatching { it.closeNoWait() } }
+    mediaFile = null
+    val opened = share.openFile(checked(relative), setOf(AccessMask.FILE_READ_DATA, AccessMask.FILE_READ_ATTRIBUTES),
       EnumSet.noneOf(FileAttributes::class.java), sharing, SMB2CreateDisposition.FILE_OPEN,
       setOf(SMB2CreateOptions.FILE_NON_DIRECTORY_FILE, SMB2CreateOptions.FILE_OPEN_REPARSE_POINT))
-    try {
-      if (file.fileInformation.basicInformation.fileAttributes and reparse != 0L) {
-        throw NetworkFailure("不允许读取 SMB 符号链接")
-      }
-      if (file.length != total) throw NetworkFailure("远端文件大小已改变，请重新打开视频")
-      return java.io.BufferedInputStream(PositionedNetworkStream(start, length,
-        { position, buffer, offset, count -> file.read(buffer, position, offset, count) }, { file.closeNoWait() }), 256 * 1024)
-    } catch (error: Exception) { file.close(); throw error }
+    if (opened.fileInformation.basicInformation.fileAttributes and reparse != 0L) {
+      opened.closeNoWait()
+      throw NetworkFailure("不允许读取 SMB 符号链接")
+    }
+    if (opened.length != total) {
+      opened.closeNoWait()
+      throw NetworkFailure("远端文件大小已改变，请重新打开视频")
+    }
+    mediaFile = opened
+    mediaPath = relative
+    mediaSize = total
+    return opened
+  }
+
+  @Synchronized
+  override fun open(relative: String, start: Long, length: Long, total: Long): InputStream {
+    val file = mediaHandle(relative, total)
+    return java.io.BufferedInputStream(PositionedNetworkStream(start, length,
+      { position, buffer, offset, count -> file.read(buffer, position, offset, count) }, { /* 句柄由 mediaHandle 复用，不在每个流结束时关闭 */ }), 256 * 1024)
   }
 
   @Synchronized
@@ -218,6 +239,8 @@ internal class SmbNetworkRemote(private val source: NetworkSource, cancellation:
   override fun abort() { closed = true; sockets.closeAll() }
 
   override fun close() {
+    mediaFile?.let { runCatching { it.closeNoWait() } }
+    mediaFile = null
     abort()
     runCatching { connection.close(true) }
     client.close()
@@ -236,10 +259,14 @@ internal class SmbNetworkRemote(private val source: NetworkSource, cancellation:
         override fun connect(endpoint: SocketAddress?) {
           cancellation?.check()
           super.connect(endpoint, 10000)
+          // 不开 TCP_NODELAY 时 Nagle + 延迟 ACK 会把每个 SMB 请求再拖上几十毫秒，
+          // 局域网里 1 MiB 读要 170 ms 就是这么来的。
+          runCatching { tcpNoDelay = true }
         }
         override fun connect(endpoint: SocketAddress?, timeout: Int) {
           cancellation?.check()
           super.connect(endpoint, if (timeout == 0) 8000 else minOf(timeout, 8000))
+          runCatching { tcpNoDelay = true }
         }
       }.also { opened.add(it) }
     }

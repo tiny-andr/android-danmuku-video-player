@@ -45,6 +45,9 @@ internal class NetworkMediaServer(
   private val token = ByteArray(32).also { SecureRandom().nextBytes(it) }
     .let { Base64.encodeToString(it, Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING) }
   private val active = ConcurrentHashMap<InputStream, String>()
+  // 每个 Range 请求原本都要走一次远端 stat；播放期间文件大小不会变，缓存几秒就能省掉
+  // 每个请求一次 SMB 往返（局域网里几十毫秒）。
+  private val statCache = ConcurrentHashMap<String, Pair<RemoteStat, Long>>()
   private val runner = BoundedRunner()
 
   init { setAsyncRunner(runner); start(15000, true) }
@@ -77,7 +80,7 @@ internal class NetworkMediaServer(
       if (sourceSnapshot != null && currentSource != sourceSnapshot) throw NetworkFailure("连接配置已变化，音轨处理已停止，请重新打开影片")
       val source = sourceSnapshot ?: currentSource
       return connections.run(source, role) { remote ->
-        val stat = remote.stat(path.relative)
+        val stat = cachedStat(remote, source, path.relative)
         if (stat.kind != "file") return@run text(Response.Status.NOT_FOUND, "网络媒体文件不存在")
         if (stat.size <= 0L) return@run text(Response.Status.RANGE_NOT_SATISFIABLE, "空文件不能作为媒体播放").apply {
           addHeader("Content-Range", "bytes */0"); addHeader("Accept-Ranges", "bytes")
@@ -101,6 +104,19 @@ internal class NetworkMediaServer(
     } catch (error: Exception) {
       return text(Response.Status.SERVICE_UNAVAILABLE, safeNetworkError(error))
     }
+  }
+
+  private fun cachedStat(remote: NetworkRemote, source: NetworkSource, relative: String): RemoteStat {
+    val key = source.id + "\u0000" + relative
+    val now = System.currentTimeMillis()
+    val hit = statCache[key]
+    if (hit != null && now - hit.second < 5000L) return hit.first
+    val stat = remote.stat(relative)
+    statCache[key] = stat to now
+    if (statCache.size > 64) {
+      statCache.entries.removeIf { now - it.value.second > 5000L }
+    }
+    return stat
   }
 
   private fun bounded(input: InputStream): InputStream {
