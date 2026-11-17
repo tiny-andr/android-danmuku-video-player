@@ -892,7 +892,10 @@
     if (loadPanel) loadPanel.hidden = true;
     document.body.classList.add("m-playing");
     if (home) home.classList.add("hide");
-    if (topbar) topbar.classList.add("show");
+    // enterPlaying 会被 loadeddata / canplay / playing 反复触发（seek、缓冲都会再来一次）。
+    // 只有真正进入播放页才亮顶部条：重复触发时控制条可能已经自动隐藏，且不会再发 control
+    // 事件，此时点亮顶部条就再也收不回来（底部消失、顶部常驻）。
+    if (first && topbar) topbar.classList.add("show");
     setImmersive(true); setPlaybackActive(true);
     setVideoOrientation(art.video.videoWidth, art.video.videoHeight);
     window.AndroidGestures.setActive(true);
