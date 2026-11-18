@@ -11,7 +11,13 @@ import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
+import android.graphics.Color
+import android.util.Log
+import android.view.SurfaceHolder
+import android.view.SurfaceView
 import android.view.View
+import android.view.ViewGroup
+import android.widget.FrameLayout
 import android.widget.Toast
 import org.json.JSONObject
 import android.os.Build
@@ -24,6 +30,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import com.danmuku.bplayer.android.mpv.AndroidMpv
+import com.danmuku.bplayer.android.mpv.MPVView
 import java.util.concurrent.atomic.AtomicBoolean
 
 class MainActivity : TauriActivity() {
@@ -31,7 +39,9 @@ class MainActivity : TauriActivity() {
   private var network: AndroidNetwork? = null
   private var thumbnails: AndroidThumbnails? = null
   private var playbackAudio: PlaybackAudioFocus? = null
-  private var audioNative: AndroidAudioNative? = null
+  private var mpvView: MPVView? = null
+  // AndroidAudioNative (the ffmpeg-kit transcode bridge) is parked: libmpv decodes audio
+  // in-process, so there is no worker to talk to. See build.gradle.kts sourceSets.exclude.
   private var updateChecker: UpdateChecker? = null
   private var immersive = false
   private var playbackActive = false
@@ -160,6 +170,7 @@ class MainActivity : TauriActivity() {
     window.decorView.viewTreeObserver.addOnGlobalLayoutListener { applyKeepScreenOn() }
     contentResolver.registerContentObserver(Settings.System.getUriFor(Settings.System.ACCELEROMETER_ROTATION), false, rotationObserver)
     applyPlaybackOrientation()
+    installCrashLogger()
 
     // 返回键交给网页决定：关闭文件浏览器 / 收起播放列表 / 退出播放页，最后才退出应用。
     // 网页的 window.__aAndroidBack 恒返回 true（退出应用是 JS 自己调 AndroidUI.exitApp），
@@ -197,15 +208,27 @@ class MainActivity : TauriActivity() {
     }
   }
 
+  /**
+   * This device's logcat is encrypted end to end, so an uncaught exception leaves no trace we can
+   * read back over adb. Dump it to the app's external files dir instead.
+   */
+  private fun installCrashLogger() {
+    val prev = Thread.getDefaultUncaughtExceptionHandler()
+    Thread.setDefaultUncaughtExceptionHandler { thread, error ->
+      try {
+        java.io.File(getExternalFilesDir(null), "crash.txt")
+          .writeText("thread=" + thread.name + "\n" + Log.getStackTraceString(error))
+      } catch (_: Throwable) {
+      }
+      prev?.uncaughtException(thread, error)
+    }
+  }
+
   override fun onWebViewCreate(webView: WebView) {
     this.webView = webView
     network?.close()
     network = AndroidNetwork(applicationContext, webView, ::ensureNetworkPermission)
     webView.addJavascriptInterface(network!!, "AndroidNetwork")
-    audioNative?.close()
-    audioNative = AndroidAudioNative(applicationContext, webView)
-    audioNative?.setForeground(foreground)
-    webView.addJavascriptInterface(audioNative!!, "AndroidAudioNative")
     thumbnails?.close()
     val thumbnailSources = NetworkThumbnailSources(applicationContext)
     thumbnails = AndroidThumbnails(applicationContext, webView, thumbnailSources::open)
@@ -227,6 +250,17 @@ class MainActivity : TauriActivity() {
       @JavascriptInterface
       fun exitApp() {
         runOnUiThread { finish() }
+      }
+
+      /** 调试用：一次性读出手动覆盖、实际请求的方向、以及系统当前配置。 */
+      @JavascriptInterface
+      fun orientationState(): String {
+        val accel = Settings.System.getInt(contentResolver, Settings.System.ACCELEROMETER_ROTATION, 0)
+        return "override=$playbackOrientationOverride" +
+            " requested=$requestedOrientation" +
+            " config=${resources.configuration.orientation}" +
+            " autoRotate=$accel" +
+            " sw=${resources.configuration.smallestScreenWidthDp}"
       }
 
       @JavascriptInterface
@@ -298,7 +332,42 @@ class MainActivity : TauriActivity() {
       // 带上构建时间戳：两种包共用同一个 versionName，没有它就分不出手机上装的是哪次构建。
       @JavascriptInterface
       fun buildKind(): String = (if (BuildConfig.DEBUG) "debug " else "") + BuildConfig.BUILD_STAMP
+
+      /**
+       * The video lives in its own surface below the page, so it has to be hidden explicitly
+       * whenever the app leaves the playback stage (home, file browser) — otherwise the last
+       * decoded frame keeps showing through the transparent page.
+       */
+      @JavascriptInterface
+      fun setVideoVisible(on: Boolean) {
+        runOnUiThread { mpvView?.visibility = if (on) View.VISIBLE else View.GONE }
+      }
     }, "AndroidUI")
+    setupMpv(webView)
+  }
+
+  /**
+   * libmpv renders into a SurfaceView placed at the bottom of the window; the WebView above it is
+   * transparent so the danmaku layer composites straight over the video. The video never enters
+   * the WebView renderer, which is what makes 4K HEVC / DTS / PGS free instead of needing the old
+   * transcode-and-MSE detour.
+   */
+  private fun setupMpv(webView: WebView) {
+    webView.setBackgroundColor(Color.TRANSPARENT)
+    webView.post {
+      if (mpvView != null) return@post
+      val content = findViewById<ViewGroup>(android.R.id.content) ?: return@post
+      val view = MPVView(this)
+      // TextureView throws on setBackgroundColor (it has no drawable background), so no red
+      // diagnostic fill here — its own surface content is the only thing it shows.
+      view.initialize()
+      // Index 0 keeps it under the WebView; a SurfaceView's default sublayer is already below
+      // window content, so no setZOrderOnTop here (that would cover the danmaku).
+      content.addView(view, 0, ViewGroup.LayoutParams(
+        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+      mpvView = view
+      webView.addJavascriptInterface(AndroidMpv(view, webView), "AndroidMpv")
+    }
   }
 
   override fun onStart() {
@@ -306,14 +375,12 @@ class MainActivity : TauriActivity() {
     foreground = true
     applyKeepScreenOn()
     playbackAudio?.onStart()
-    audioNative?.setForeground(true)
   }
 
   override fun onStop() {
     foreground = false
     applyKeepScreenOn()
     playbackAudio?.onStop()
-    audioNative?.setForeground(false)
     super.onStop()
   }
 
@@ -321,9 +388,8 @@ class MainActivity : TauriActivity() {
     contentResolver.unregisterContentObserver(rotationObserver)
     playbackBrightness = -1f
     window.attributes = window.attributes.apply { screenBrightness = -1f }
-    webView?.removeJavascriptInterface("AndroidAudioNative")
-    audioNative?.close()
-    audioNative = null
+    mpvView?.shutdown()
+    mpvView = null
     webView?.removeJavascriptInterface("AndroidNetwork")
     webView?.removeJavascriptInterface("AndroidThumbnails")
     thumbnails?.close()

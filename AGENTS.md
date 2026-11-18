@@ -44,7 +44,7 @@ research/
 
 - **前端**：`index.html` 承载播放核心，`android-shell.js` 在它之前加载，负责手机布局与交互；不要重写播放器核心，优先复用现有 DOM/事件（如 `#btnOpenVideo`、`#btnAudioEntry`、`#btnBlockEntry`、`#settingsMask`、`#infobar` 的数值节点）。
 - **选文件**：`window.__aInvoke` 拦截 `pick_video` / `pick_folder`，交由 `android-storage.js` 打开触摸文件浏览器。本地真实路径通过 asset 协议播放；`/@network/<id>/...` 虚拟路径通过原生网络桥与本机 Range 媒体代理播放。
-- **Rust / audio commands**: Rust still provides local scanning and text reads. Android audio probe/prepare/start/cancel/cache listing now use `AndroidAudioNative` and `android-audio.js`; do not route them to the legacy Rust transcode stubs. Embedded text subtitle extraction is implemented for both local and network sources (see §4.1 / §4.3); PGS bitmap rendering is implemented too (§4.1).
+- **Rust / audio commands**: Rust 只剩本地扫描与文本读取（`fs_stat` / `scan_folder` / `list_dir` / `scan_subtitles` / `pair_danmaku` / `read_text` / `read_bytes` / `pick_*` / `app_version` 及若干空实现桩）。**音轨探测、转码、内嵌字幕抽取、PGS 渲染全部随 0.2.0 下线**——libmpv 直接解码每一条音轨、libass 直接渲染每一条字幕轨（见 §4.9），`android-audio.js` 的 `probe()`/`select()` 在 mpv 模式下走 `track-list` + `setAid`。
 - **原生桥**：`MainActivity.kt` 通过 `AndroidUI` 提供沉浸式、按视频尺寸选择方向、播放常亮、窗口亮度、媒体音量与退出能力。亮度只改当前窗口，退出播放恢复系统亮度；音量使用 Android 媒体音量，不用网页音量伪装。
   Native and top Back share `window.__aAndroidBack()`: touch-lock/resume decision, file-browser hierarchy, loading/pending-task cancellation, top overlay, playback origin, then app exit. Playback must restore its launch origin, not hard-code home or derive a directory from the media path. `__aAndroidBack()` 恒返回 true（退出应用是 JS 自己调 `AndroidUI.exitApp()`），所以原生侧 `dispatchBackToWeb()` 只把 "true" 当「网页接住了」：收到 null/false（页面没就绪 / 函数未定义）或 2 秒内回调始终不来时自行 `finish()` 兜底，否则冷启动白屏或页面 JS 异常时按返回键会完全没反应。
 - **Navigation**: `android-navigation.js` owns registered layers; use open/close/clear rather than independent DOM toggles. `close()` 与 `clear()` 对栈内层都走 hide()+onClose()（clear 按出栈逆序补触发，否则 playlist 的 `playlistClosed()` 会被漏掉、folderOrigin 还原丢失）；不在栈里的层照旧一律 hide。 Information-card children restore their caller; direct controls return to playback. `AndroidFiles.takeSelection(path)` transfers a one-shot immutable browser snapshot; `restore(snapshot)` returns a picker promise. Episode changes retain the session origin; explicit folder lists retain their browser caller. See `research/navigation-return-rules.md`.
@@ -56,7 +56,8 @@ research/
 - **网络存储**：`AndroidNetwork` 提供异步请求和流式媒体 URL；连接凭据使用 Android Keystore 加密，网页只接收公开字段。SMB 仅启用 2.1/3.x，WebDAV 仅 HTTPS，SFTP 必须核对主机指纹；禁止跳过证书或指纹校验。详细结构见 `research/network-storage.md`。
 - **方向策略**：Manifest 为 `user`。首页遵守系统旋转设置，禁止使用 `fullSensor` 绕过旋转锁。关闭系统自动旋转时播放保持当前方向；开启时，视频宽 > 高使用横屏，宽 ≤ 高使用竖屏。顶部“横屏／竖屏”是用户主动覆盖方向的入口，随控件显隐，不修改系统开关；退出或换片清除覆盖。等待真实视频尺寸后才选默认方向，退出播放恢复系统策略。
 - **播放控制栏**：弹幕插件通过 `mount()` 固定到 `.mDanControls`，不要让窄屏自动把工具栏移到画面底边。顶部不再重复放弹幕开关；横竖屏的底部开关和设置均保留，控制区使用高不透明黑色背景。
-- **播放会话**：系统音频焦点由 WebView/Chromium 唯一持有，禁止另起原生 `AudioFocusRequest` 与自身抢占。`AndroidPlaybackAudio` 只管理前台会话许可、耳机断开与后台暂停；中断后不自动恢复。续播使用稳定文件路径记录，弹出继续/从头选择；触摸锁下只保留解锁入口，禁止亮度、音量和跳转手势。
+- **播放会话**：**解码与发声都在本进程的 libmpv 里**（0.2.0 起）：mpv 把画面渲染到 WebView 底下的 `TextureView`，WebView 变透明只负责弹幕与控件。**字幕也归 mpv**：`sub-auto=fuzzy` 自动选容器 default 轨，libass 把文本字幕（含 ASS 样式）和 PGS 位图画在视频帧上，菜单切换走 `sid`、外挂走 `sub-add`——前端不再抽取 cue 文本。**音频焦点也由本进程持有**：`PlaybackAudioFocus.requestFocus()` 申请 `AudioFocusRequest`（`USAGE_MEDIA` / `CONTENT_TYPE_MOVIE`），`LOSS` 与 `LOSS_TRANSIENT` 一律暂停且**不自动恢复**（JS 侧 `pauseFor('focus-loss')`），`abandonFocus` / `onStop` / `close` 交还焦点。续播使用稳定文件路径记录，弹出继续/从头选择；触摸锁下只保留解锁入口，禁止亮度、音量和跳转手势。
+- **libmpv 播放层**: `mpv/MPVView.kt` 持 `MPVLib` 并把 `Surface` 交给它，`mpv/AndroidMpv.kt` 是同步 `@JavascriptInterface` 桥（时间轴每帧要读，不能走请求/回复）。前端 `ui/android-native-timeline.js` 把 `<video>` 变成假视频（Artplayer 的 `option.proxy` 指向它），`ui/android-native-player.js` 负责 4Hz push 状态、打开/暂停/跳转转发、播放页透明与原生层显隐。详见 §4.9 与 §7 的前两条坑。
 - **窗口适配**：按可用窗口而非设备型号识别大屏。宽度至少 720 CSS 像素时直出音轨、字幕、设置入口；宽且高至少 540 时首页与文件浏览双栏，短横屏仍紧凑布局。快捷按钮复用原入口的事件与可用性，不能复制两套轨道状态。
 - **封面预览**：`AndroidThumbnails` 只接受稳定本地/网络路径，独立精确读取连接不复用媒体池；每任务最多请求 12 MiB，单次 64 KiB，启动后约 4 秒超时失败回占位，解码隔离在不可导出的 `:thumbnails` 服务。不得以无预算媒体 URL 或全文件扫描生成预览；最近播放只读私有封面缓存，不因打开首页连接 NAS。
 - **Thumbnail fast paths**: Cache-only requests use a separate bounded local worker/queue, never the remote extraction queue. Decoder block fills remain within 64 KiB/read and 12 MiB/task. Playback frame capture must not open another video connection; validate JPEG size/dimensions before storing. Recent-history deletion removes only that history item, never its file, resume record or thumbnail. Hold-to-speed is explicitly excluded.
@@ -69,7 +70,14 @@ research/
 
 逐个模块记录：职责、对外接口、内部数据流、失败语义。**「为什么这么写」在 §7 注意的坑里**。
 
-### 4.1 Rust 后端（7 个）
+### 4.1 Rust 后端（现存 3 个 + 4 个已下线）
+
+> **0.2.0 起下线**：`mkv_probe.rs` / `mkv_sub.rs` / `pgs_render.rs` / `http_range.rs` 以及它们
+> 对应的 8 个命令（`probe_mkv_tracks`、`extract_subtitle_text`、`extract_subtitle_text_url`、
+> `pgs_open`/`pgs_image`/`pgs_close`/`pgs_current`）已整体删除，`libpgs` / `png` / `ureq`
+> 三个依赖同步移除。容器解析、文本字幕抽取和 PGS 解码现在都在 libmpv 里做，Rust 不再碰
+> 媒体字节。源码留在 `tmp/parked-rust/` 备查，`lib.rs` 从 577 行降到 455 行。
+> 下面这张表和两段细节保留下来，是为了解释「为什么曾经要这么写」。
 
 大部分与桌面版同源（`H:\Project\Bplayer\src-tauri\src\`），这里只写**差异**。
 
@@ -108,7 +116,7 @@ research/
 | JS 全局名 | Kotlin 实现 | 职责 |
 |---|---|---|
 | `AndroidUI` | `MainActivity` 内匿名对象 | 沉浸式、方向、亮度、音量、常亮、权限、`buildKind()` |
-| `AndroidAudioNative` | `AndroidAudioNative` | 音轨任务、音轨流、字幕读取器 |
+| `AndroidMpv` | `mpv/AndroidMpv` | libmpv 控制与状态（见 §4.9）。**同步返回**，不走下面的请求-回复协议 |
 | `AndroidNetwork` | `AndroidNetwork` | 网络源 CRUD、浏览、文件系统命令、`mediaUrl()` |
 | `AndroidThumbnails` | `AndroidThumbnails` | 封面请求 `request` / 结果回写 `store` / `cancel` |
 | `AndroidPlaybackAudio` | `PlaybackAudioFocus` | 前台播放会话许可、耳机断开、后台暂停 |
@@ -125,7 +133,14 @@ Kotlin: reply(id, ok, payloadJson)  ->  JS 侧按 id 找到 pending Promise 并 
 - **信任检查**：每个桥的 `request` 第一行都要求 `trustedPage()`（`http://tauri.localhost`），否则直接丢。
 - **每条桥是单链**：有请求在跑时再发会被直接拒绝（前端也要自己挡，见 §7）。
 
-### 4.3 音轨处理链
+### 4.3 音轨处理链（已下线）
+
+> **0.2.0 起整条链下线**：libmpv 直接解码容器里的每一条音轨（DTS / TrueHD / AC-3 / E-AC-3…），
+> 切换就是 `set aid <id>`，既不转码也不落盘。`AudioDecodeService` / `AudioWorkerClient` /
+> `AudioMedia` / `AndroidAudioNative` 及 `:audio_transcode` 服务已移出编译
+> （源码在 `tmp/parked-audio/`），前端 `android-audio.js` 的 `probe()` / `select()` 在
+> `window.AndroidMpv` 存在时直接读 `track-list` 并 `setAid`，走不到下面的链路。
+> 保留这段是为了解释历史上的缓存命名、指纹和远端发布语义；不要再往里加逻辑。
 
 ```
 android-audio.js  ──(request)──▶  AndroidAudioNative  ──(Messenger)──▶  AudioDecodeService
@@ -218,11 +233,12 @@ android-storage.js ─▶ AndroidNetwork ─▶ NetworkConnections ─▶ Smb/We
 ### 4.7 宿主与播放会话
 
 - `MainActivity.kt`（342 行）—— 宿主 + `AndroidUI` 桥。`setupWebView()` 注册全部 6 个 JS 接口。
-  - **方向策略** `applyPlaybackOrientation()`：`home` → `USER`；用户手动覆盖 → `LANDSCAPE` / `PORTRAIT`；系统自动旋转关 → `LOCKED`；否则按画面形状 `USER_LANDSCAPE` / `USER_PORTRAIT`，**大屏**（`smallestScreenWidthDp >= 600`）改用 `LANDSCAPE` / `PORTRAIT`（大屏上 `USER_*` 不生效）。
+  - **方向策略** `applyPlaybackOrientation()`：`home` → `USER`；用户手动覆盖 → `LANDSCAPE` / `PORTRAIT`；系统自动旋转关 → `LOCKED`；否则按画面形状 `USER_LANDSCAPE` / `USER_PORTRAIT`。
+  - **软横屏（大屏兜底）**：Android 16+ 在 `sw >= 600dp` 的屏幕上**直接丢弃** `setRequestedOrientation`（`targetSdk` 降到 35 也照样丢，实测 ColorOS 不按 targetSdk 判断），平板上的「横屏」按钮因此无效。前端 `__softLandscape(on)` 兜底：`video-rotate=90` 让 mpv 先转画面再按新宽高 contain（宽度自然铺满），弹幕层加 CSS `rotate(90deg)` 跟随，控制条与顶栏保持竖持布局——**触摸坐标不用重映射**，Chromium 自己处理 CSS transform 的命中测试。按钮逻辑：先请求系统旋转，1.2s 后窗口仍是竖的才落到软横屏，所以手机上行为完全不变。见 §7 的软横屏三条坑。
   - **沉浸式**：`WindowInsetsControllerCompat.hide(systemBars)` + 旧 `systemUiVisibility` 全屏位（任务栏仍按导航栏缩窗口时补这一层）。
   - **存储权限**：`hasAllFilesAccess()` / `requestAllFilesAccess()`，没有 `MANAGE_EXTERNAL_STORAGE` 时浏览器是空白目录，必须先引导。
   - **构建戳**：`buildKind()` 返回 `"debug MMdd-HHmm"` / `"MMdd-HHmm"`（`BuildConfig.BUILD_STAMP`，两个包同一次构建用同一个值）。
-- `PlaybackAudioFocus.kt` —— 只做前台会话许可 + 耳机断开 + 后台暂停，**不申请 `AudioFocusRequest`**（系统音频焦点由 WebView/Chromium 唯一持有）。
+- `PlaybackAudioFocus.kt` —— 前台会话许可 + **系统音频焦点** + 耳机断开 + 后台暂停。`requestFocus()` 申请 `AudioFocusRequest`（`USAGE_MEDIA` / `CONTENT_TYPE_MOVIE`，`GAIN`），`LOSS`/`LOSS_TRANSIENT` 走 `notify(session, "focus-loss")` → JS `pauseFor` 暂停且不自动恢复；`abandonFocus`/`onStop`/`close` 都会 `abandonAudioFocusRequest`。真机核对方式：`adb shell dumpsys audio | grep -A2 'audio focus'`，栈顶应是本应用且 `gain: GAIN`。
 - `android-shell.js`（1093 行）—— 手机壳：启动页、播放页顶栏、信息卡、版本行、`__aAndroidBack()` 返回键分层决策。
 - `android-gestures.js` —— 播放区亮度/媒体音量手势、双击跳转、触摸锁仲裁。
 - `android-player-tools.js` —— 续播弹层、锁屏、适应/裁剪、原生音频会话接线。
@@ -231,13 +247,26 @@ android-storage.js ─▶ AndroidNetwork ─▶ NetworkConnections ─▶ Smb/We
 
 | 文件 | 职责 |
 |---|---|
-| `index.html`（3436 行） | 播放核心：Artplayer 装配、B 站弹幕、字幕层、音轨决策、MSE 流式音轨、网络源适配 |
+| `index.html`（约 3100 行） | 播放核心：Artplayer 装配、B 站弹幕、字幕菜单、音轨菜单、网络源适配。0.2.0 起解码/音轨/字幕都交给 libmpv，MSE 流式与 PGS 贴图层已删除 |
 | `android-storage.js`（702 行） | 触摸文件浏览器 + 网络连接表单；拦截 `window.__aInvoke` 的 `pick_video` / `pick_folder` |
 | `android-sidecars.js` | 有界文本解码（32 MiB 上限）、字幕规范化、语言偏好排序 |
 | `android-subtitle-view.js` | 字幕轨原子加载（先 stage 再替换）、`textContent` 安全渲染、每片重置延时 |
 | `android-navigation.js` | Overlay 栈：注册/打开/关闭/清理；返回键层级与滚动锚点 |
 | `android-resume-store.js` | 断点记录 `bplayer.android.resume.v1`（本地/网络路径分存） |
 | `android-file-order.js` | 自然文件名 / 修改时间 / 类型排序 |
+
+### 4.9 libmpv 播放层（0.2.0 起）
+
+| 文件 | 职责 |
+|---|---|
+| `mpv/MPVView.kt` | `TextureView` 子类，持 `MPVLib`。`initialize()` 建实例并在 `init()` 前设 option（`vo=gpu`、`gpu-context=android`、`hwdec=mediacodec`、`osd-level=0`、`sub-auto=fuzzy`）；`onSurfaceTextureAvailable` 里 `attachSurface` + 重开 VO。**必须是 TextureView，不能是 SurfaceView**（见 §7 第一条） |
+| `mpv/AndroidMpv.kt` | 同步 `@JavascriptInterface` 桥。`open/timePos/duration/paused/eof/play/pause/seekTo/setRate/setVolume/setMute` + `tracks()`（mpv 的 `track-list` JSON 原样透传）+ `setAid/setSid/addSub/addAudio/setSubDelay/setSubScale` + `debug()`（`vo` / `vo-configured` / `hwdec-current` / `surfaceCreates` / `attaches` / `attachValid`，真机排查专用） |
+| `ui/android-native-timeline.js` | 假视频垫片：用一个不加载媒体的 `<video>` 承载 DOM 与事件，`defineProperty` 覆盖 12 个属性 + 4 个方法，provider 从桥取值。seek 期间按「目标 + 陈旧帧」状态机丢弃迟到帧 |
+| `ui/android-native-player.js` | 接线层：4Hz push 状态、`open()/close()`、`__mpvFileLoaded` / `__mpvEndFile` 回调、播放页 `body.aplaying` 与 `AndroidUI.setVideoVisible` 联动 |
+
+命令通道统一走 `MPVLib.command(arrayOf(...))`：切轨 `set aid|sid <id>`（`no` = 关）、跳转 `seek <秒> absolute`、外挂轨 `sub-add` / `audio-add`。
+
+**音轨菜单**：`android-audio.js` 的 `probe()` 在 `window.AndroidMpv` 存在时直接读 `tracks()`，`select()` 直接 `setAid`——不跑 ffprobe、不转码、不建缓存。旧的 `AndroidAudioNative` 转码链整体移出编译（源码在 `tmp/parked-audio/`）。
 
 ## 5. 构建与安装
 
@@ -276,6 +305,15 @@ Audio conversion now works through the Android native bridge: local DTS/TrueHD/A
 
 ## 7. 注意的坑
 
+- **`SurfaceView` 在 Tauri 里永远显示不出来，必须用 `TextureView`**（2026-11-18 实测，代价是五轮排查）。现象极具误导性：mpv 报 `vo=gpu configured=yes`、`attaches=2 attachValid=true`、`hwdec=mediacodec`、`android-surface-size` 正确，屏幕却全黑。根因是 Tauri 的 WebView 走自己的 `SurfaceControl` 合成层，那一层恒定压在 `SurfaceView` 的 media sublayer 之上，页面透明与否都挡。`setZOrderMediaOverlay(true)` 和 `setLayerType(LAYER_TYPE_HARDWARE)` 都无效；`setZOrderOnTop(true)` 能出画面但会把弹幕整个盖住。换成 `TextureView`（普通 View，走常规合成顺序，加在 content 的 index 0）才通。**另外 `TextureView.setBackgroundColor()` 会抛 `UnsupportedOperationException`**，别拿它做诊断填充。
+- **假 video 的方法必须可写**：垫片的 `define()` 只设了 `configurable`，Artplayer 在某些路径上会给 `$video.play` 重新赋值，报 `Cannot assign to read only property 'play'`。`define()` 里要补 `writable: true`。
+- **`currentTime` 变量不在 `setVideoFromUrl` 的作用域里**：想给 mpv 传路径只能在调用点（`loadVideoSource`）拿 `path` 自己算——本地路径原样传，`/@network/...` 必须先转成 `mediaUrl(path)`（`asset://` 是 WebView 私有协议，mpv 读不到）。
+- **mpv 加载完再 `play()` 会让播放器停在 0**：`loadfile` 之后、文件就绪之前落下的 `pause=false` 会被后续状态覆盖，表现为「加载完了但停在 0 秒」，30 秒后 `android-shell.js` 的加载看门狗弹"连接或缓冲超时"。要在 `open()` 里**先** `bridge.play()` 再等加载。
+- **垫片在暂停态不发 `timeupdate`**（弹幕循环要停），但进度条和时间显示只认这个事件；暂停中拖动进度条必须由接线层补发一次 `emitTimeupdate()`，否则 UI 停在旧秒数。
+- **`sub-pos` 的百分比基准是「视频画面」，不是窗口**：竖屏 letterbox 时按窗口高度折算（例如算出 62）会把字幕摆到画面中间；`100` 本身就是画面底边。老版 `AndroidSubtitleView.placement()` 那套「先算 contain 后的画面矩形、再定位」的换算在 mpv 这边不适用，直接用默认 100。
+- **软横屏只能让 mpv 转画面，不要让 View 转**：`TextureView.rotation + scaleX/scaleY` 会把画面缩成竖长条，`Matrix.postRotate + postScale` 会缩成方块——两者都是「先把画面 contain 进竖窗口的位图，再旋转那张图」，比例已经丢了。`video-rotate=90` 是 mpv 先转画面再按新宽高 contain，宽度自然铺满。
+- **`setRequestedOrientation` 在 `sw>=600dp` 上被系统硬丢**：Android 16 官方文档写的是「以 API 36 为目标平台的应用」，但实测 ColorOS 对 `targetSdk=35` 的应用照样忽略（`h1318dp` + `ROTATION_0` 纹丝不动），把 Manifest 的 `screenOrientation` 删成 `unspecified` 也没用。别在这条路上继续试，直接走软横屏。
+- 这台设备（荣耀 VER-AN10）的 **logcat 全程被厂商加密**，`adb logcat` 读不到任何应用日志。排查只能靠：把状态暴露成 `@JavascriptInterface` 方法用 CDP 读，或 `Thread.setDefaultUncaughtExceptionHandler` 把堆栈写到 `getExternalFilesDir()/crash.txt` 再 `adb shell cat`。
 - `.stage` 等元素带 `animation-fill-mode: both` 的 identity `transform` 会形成 containing block，fixed 后代无法全屏；全屏规则必须落在 `.stage` 上并清 `transform/animation`。
 - 原 CSS `#aFileMask{display:flex}` 会压过 `[hidden]`，需要 `#aFileMask[hidden]{display:none!important}`。
 - 播放列表曾因同样的 animation transform 永远展开，必须用 `!important` 压回 `translateX`。

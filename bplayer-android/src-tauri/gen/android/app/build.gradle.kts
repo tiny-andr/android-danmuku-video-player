@@ -34,7 +34,14 @@ android {
         manifestPlaceholders["appName"] = "Bplayer"
         applicationId = "com.danmuku.bplayer.android"
         minSdk = 26
-        targetSdk = 37
+        // targetSdk 故意停在 35，不上 36/37：
+    // Android 16（API 36）起，targetSdk >= 36 的应用在 sw>=600dp 的大屏上会被系统忽略
+    // setRequestedOrientation / screenOrientation（官方文档 "应用屏幕方向、宽高比和尺寸
+    // 调整"），唯一豁免是 appCategory="game"——而那会让荣耀/ColorOS 把整个应用当游戏，
+    // 拉满游戏模式（用户明确不接受）。
+    // 停在 35 就完全不受这条限制约束，平板上的「横屏/竖屏」按钮能正常工作。
+    // compileSdk 仍是 37，新 API 照常可用，只是不主动声明适配 36 的行为变更。
+    targetSdk = 35
         versionCode = tauriProperties.getProperty("tauri.android.versionCode", "1").toInt()
         versionName = tauriProperties.getProperty("tauri.android.versionName", "1.0")
         // Build stamp so a sideloaded APK can be identified at a glance: debug and release
@@ -42,7 +49,13 @@ android {
         // package installed on the phone is the one that was just built. Both tracks are
         // built back to back with the same BPLAYER_BUILD_STAMP so they stay comparable.
         buildConfigField("String", "BUILD_STAMP", "\"$bplayerBuildStamp\"")
+        // libmpv's AAR ships four ABIs (109 MiB unpacked). The app is arm64-only.
+        ndk { abiFilters += listOf("arm64-v8a") }
     }
+    // The WebView `<video>` could not decode DTS/TrueHD/PGS, so the app grew an FFmpeg
+    // transcode chain (worker process, cache files, MSE streaming). libmpv decodes all of it
+    // natively, and its bundled FFmpeg collides file-for-file with ffmpeg-kit's, so those
+    // sources are parked under tmp/parked-audio/ until the port is finished.
     // Release signing comes from gen/android/keystore.properties, which is never committed.
     // When the file is absent the release build keeps the default debug key so local builds
     // still work; published release artifacts always use the real key.
@@ -113,8 +126,9 @@ rust {
 }
 
 dependencies {
-    implementation("dev.ffmpegkit-maintained:ffmpeg-kit-min:8.1.7")
-    implementation("com.arthenica:smart-exception-java:0.2.1")
+    // libmpv (mpv 0.42 / FFmpeg 9.0.2 / libass 0.17.5), arm64 only via abiFilters above.
+    // Local AAR: it is not on a Maven repo we control, and the file is verified by sha256.
+    implementation(files("libs/libmpv-release.aar"))
     implementation("androidx.webkit:webkit:1.14.0")
     implementation("androidx.appcompat:appcompat:1.7.1")
     implementation("androidx.activity:activity-ktx:1.10.1")
