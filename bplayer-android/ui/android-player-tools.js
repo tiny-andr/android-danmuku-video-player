@@ -263,6 +263,9 @@
         var granted = false;
         try { granted = window.AndroidPlaybackAudio.requestFocus(); } catch (error) {}
         if (!granted) {
+          // 上面刚把 playAllowed 置 true；拒绝分支不复位的话，这个「已放行」会残留到下一次
+          // video:play（art.on("video:play") 只看这个标志），把一次失败尝试当成用户放行。
+          playAllowed = false;
           notify("暂时无法获得音频焦点，请稍后再播放");
           return Promise.reject(new DOMException("Audio focus denied", "NotAllowedError"));
         }

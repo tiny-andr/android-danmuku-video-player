@@ -307,19 +307,25 @@ internal class AndroidAudioNative(context: Context, private val webView: WebView
     private var initBytes = ByteArray(0)
     private var fragBytes = ByteArray(0)
     private val ready = ArrayDeque<ByteArray>()
-    private var overflowed = false
+    private var overflowedFlag = false
+
+    /**
+     * 缓冲溢出：切块器已经把攒不下的缓冲整段丢掉，这之后流里缺字节、不再可能拼出完整
+     * fragment。读端必须看见这个状态并中止，不能把它当成「暂时没数据」或正常 eof。
+     */
+    val overflowed: Boolean get() = overflowedFlag
 
     fun feed(bytes: ByteArray) {
       if (bytes.isEmpty()) return
       buffer = if (buffer.isEmpty()) bytes else buffer + bytes
       // 防御：切成 1 秒一片时任何一块都不该到 MB 级，堆积说明 muxer 参数不对
-      if (buffer.size > 32 * 1024 * 1024) { overflowed = true; buffer = ByteArray(0) }
+      if (buffer.size > 32 * 1024 * 1024) { overflowedFlag = true; buffer = ByteArray(0) }
     }
 
     fun take(): ByteArray? {
       while (true) {
         if (ready.isNotEmpty()) return ready.removeFirst()
-        if (overflowed) return null
+        if (overflowedFlag) return null
         val header = header(buffer) ?: return null
         if (buffer.size < header.second) return null
         val box = buffer.copyOfRange(0, header.second)
@@ -408,12 +414,16 @@ internal class AndroidAudioNative(context: Context, private val webView: WebView
     while (true) {
       state.pump()
       state.splitter.take()?.let { return Base64.encodeToString(it, Base64.NO_WRAP) to false }
+      // 溢出后切块器已经丢掉了缓冲，后面的字节再也拼不出完整 fragment：必须在 eof 判断
+      // 之前按失败中止，否则会落进 eof 分支被当成「正常转码结束」，前端静默丢音轨且无提示。
+      failOnOverflow(state)
       if (state.eof) {
         // 终态之后再读一遍，把 ffmpeg 已经写好但还没搬走的尾巴交出去
         while (true) {
           val more = state.pump()
           val rest = state.splitter.take()
           if (rest != null) return Base64.encodeToString(rest, Base64.NO_WRAP) to false
+          failOnOverflow(state)
           if (!more) break
         }
         state.failure?.let { throw NetworkFailure(it) }
@@ -423,6 +433,11 @@ internal class AndroidAudioNative(context: Context, private val webView: WebView
       if (System.currentTimeMillis() >= deadline) return "" to false
       Thread.sleep(20L)
     }
+  }
+
+  /** 切块器缓冲溢出后数据已不可用，按明确错误中止；不能伪装成「暂时没数据」或正常 eof。 */
+  private fun failOnOverflow(state: StreamState) {
+    if (state.splitter.overflowed) throw NetworkFailure("音轨流缓冲溢出，已中止")
   }
 
   private fun closeStream(state: StreamState) {

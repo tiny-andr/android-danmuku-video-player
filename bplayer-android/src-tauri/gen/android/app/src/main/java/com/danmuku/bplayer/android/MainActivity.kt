@@ -24,6 +24,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import java.util.concurrent.atomic.AtomicBoolean
 
 class MainActivity : TauriActivity() {
   private var webView: WebView? = null
@@ -161,16 +162,39 @@ class MainActivity : TauriActivity() {
     applyPlaybackOrientation()
 
     // 返回键交给网页决定：关闭文件浏览器 / 收起播放列表 / 退出播放页，最后才退出应用。
+    // 网页的 window.__aAndroidBack 恒返回 true（退出应用是 JS 自己调 AndroidUI.exitApp），
+    // 所以 true 只代表「网页接住了这次返回键」；null / false（页面未就绪 / 桥未注入）、
+    // evaluateJavascript 抛异常、或 2 秒内回调始终不来时，才由原生 finish() 兜底。
     onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
-      override fun handleOnBackPressed() {
-        val w = webView
-        if (w != null) {
-          w.evaluateJavascript("window.__aAndroidBack ? window.__aAndroidBack() : false", null)
-        } else {
-          finish()
-        }
-      }
+      override fun handleOnBackPressed() { dispatchBackToWeb() }
     })
+  }
+
+  /**
+   * 把返回键交给网页，并兜住「网页没接住」的几种情况。每次按键独立计时：结果回调一到就撤销
+   * 超时，网页只是慢一点不会被 2 秒兜底误杀；finish() 用 CAS 保证每次按键最多执行一次。
+   */
+  private fun dispatchBackToWeb() {
+    val w = webView
+    if (w == null) {
+      finish()
+      return
+    }
+    val settled = AtomicBoolean(false)
+    val handler = Handler(Looper.getMainLooper())
+    val timeout = Runnable { if (settled.compareAndSet(false, true)) finish() }
+    handler.postDelayed(timeout, BACK_DISPATCH_TIMEOUT_MS)
+    try {
+      // 表达式在 __aAndroidBack 未定义时返回 false，页面没就绪时回调拿到 null。
+      w.evaluateJavascript("window.__aAndroidBack ? window.__aAndroidBack() : false") { result ->
+        handler.removeCallbacks(timeout)
+        if (settled.compareAndSet(false, true) && result != "true") finish()
+      }
+    } catch (_: Exception) {
+      // WebView 已销毁 / 桥不可用：等不到回调，等同于网页没接住。
+      handler.removeCallbacks(timeout)
+      if (settled.compareAndSet(false, true)) finish()
+    }
   }
 
   override fun onWebViewCreate(webView: WebView) {
@@ -368,5 +392,10 @@ class MainActivity : TauriActivity() {
         View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or
         View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
     }
+  }
+
+  private companion object {
+    /** 返回键交网页后的兜底时长；正常路径的 evaluateJavascript 回调是毫秒级的。 */
+    const val BACK_DISPATCH_TIMEOUT_MS = 2000L
   }
 }

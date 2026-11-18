@@ -77,6 +77,11 @@ impl HttpRangeReader {
     }
 
     /// 取 `[start, start+want)`。返回可能短于 `want`（文件尾），由调用方按实际长度处理。
+    ///
+    /// 只接受 206；200 仅当 `start == 0`（RFC 7233 允许 Range 覆盖整个资源时回 200，
+    /// 此时响应体开头正好是要的起点）。`start != 0` 的 200 说明上游忽略了 Range、
+    /// 从头返回整个文件——照单全收就会把**文件头**当成偏移 `start` 处的数据，
+    /// 后续解析全部静默错位，必须报错而不是 fail-open。
     fn fetch_with(agent: &ureq::Agent, url: &str, start: u64, want: u64) -> io::Result<Vec<u8>> {
         if want == 0 {
             return Ok(Vec::new());
@@ -88,7 +93,16 @@ impl HttpRangeReader {
             .call()
             .map_err(|error| io::Error::new(io::ErrorKind::Other, error.to_string()))?;
         let status = response.status();
-        if status != 206 && status != 200 {
+        if status == 200 {
+            if start != 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    format!(
+                        "上游忽略了 Range 请求（bytes={start}-{end}），返回 200 全文件，无法定位偏移 {start}"
+                    ),
+                ));
+            }
+        } else if status != 206 {
             return Err(io::Error::new(io::ErrorKind::Other, format!("媒体代理返回 {status}")));
         }
         let mut buffer = Vec::with_capacity(want as usize);
@@ -115,11 +129,41 @@ impl HttpRangeReader {
         }
     }
 
+    /// 把一块写进缓存，并在这里收口 `MAX_CACHE_BYTES` 预算。
+    ///
+    /// 慢路径 `load()` 是逐条 cue 按需读的，每次垫 32 KiB，两千多条 cue 就能垫到
+    /// 数倍于上限；`prefetch()` 里的预算只约束预取那一次，管不到它。所以硬顶必须
+    /// 落在唯一的写入口 `insert()` 上，否则 Android 的 LMK 会直接收掉进程。
     fn insert(&mut self, start: u64, bytes: Vec<u8>) {
         if bytes.is_empty() {
             return;
         }
-        self.cache_bytes += bytes.len();
+        // 同键覆盖：先把旧块长度从计数里扣掉，否则重复累加会让记账只增不减。
+        if let Some(old) = self.blocks.remove(&start) {
+            self.cache_bytes = self.cache_bytes.saturating_sub(old.len());
+        }
+        let len = bytes.len();
+        if len > MAX_CACHE_BYTES {
+            // 单块本身比整份预算还大（超大 `read`）：留谁都装不下，清空只留这一块。
+            // 否则会先把有用的块全删光、最后还是超预算，白折腾。
+            self.blocks.clear();
+            self.cache_bytes = len;
+            self.blocks.insert(start, bytes);
+            return;
+        }
+        // 淘汰离 `pos` 最远的块：`pos` 附近（含覆盖 `pos` 的那块）距离最小，
+        // 永远是最后被删的；而本次要写入的新块是在循环之后才入表，不可能被自己挤掉。
+        // 这两条合起来保证正在读的位置不会被驱逐出缓存。
+        while self.cache_bytes + len > MAX_CACHE_BYTES && !self.blocks.is_empty() {
+            // 先取出 key 再 remove：不能在遍历 `keys()` 的同时改表（借用冲突）。
+            let Some(farthest) = self.blocks.keys().max_by_key(|key| key.abs_diff(self.pos)).copied() else {
+                break;
+            };
+            if let Some(old) = self.blocks.remove(&farthest) {
+                self.cache_bytes = self.cache_bytes.saturating_sub(old.len());
+            }
+        }
+        self.cache_bytes += len;
         self.blocks.insert(start, bytes);
     }
 

@@ -1811,7 +1811,10 @@
           if (probe.allTracks.some(function (track) { return track.kind === 'subtitle'; })) buildSubtitleMenu(currentVideoPath, probe.allTracks, audioSubtitleToken);
           audioStatus(probeTracks.length ? '点击音轨可处理并切换；自动仅使用默认轨。' : '此文件没有音轨。', false);
         },
-        resetTrack: function () { if (audioTrack) audioTrack.reset(); externalOrdinal = -1; },
+        // 停流不变式：select() 的 cached / disabled / error 三个出口只 emit 本钩子、不调
+        // hooks.stream，若这里不停流，旧一路流式转码（ffmpeg + MSE）会继续在后台占 CPU
+        // 和磁盘。stopStreamAudio 自身幂等（无流时只清定时器），重复调用无副作用。
+        resetTrack: function () { stopStreamAudio(); if (audioTrack) audioTrack.reset(); externalOrdinal = -1; },
         isolate: function () {
           if (!isolateVideoAudio()) throw new Error('无法隔离原视频音频，已拒绝同时播放两条声音');
         },
@@ -2214,9 +2217,13 @@
 
     // 跳到流没覆盖的位置就重起一路（ffmpeg 重新 seek 编码）。Windows 端同样在 seek 时重起，
     // 只是那边靠管道，这边靠关文件再开一条。
+    // 注意不能因 eof 短路：转码完成后 s.eof = true，而 trimStreamBuffer() 已经把播放头前
+    // 60 秒的缓冲 remove 掉，用户往回拖就落进空洞 —— 不重起就是永远静音、连提示都没有。
+    // 仍然只在「目标确实不在 buffered 里」时重起（streamBufferedAt 挡在前面），所以
+    // 已缓冲区域内的普通 seek 不会触发重启风暴。
     function scheduleStreamRestart(time) {
       var s = streamAudio;
-      if (!s || s.stopped || s.eof) return;
+      if (!s || s.stopped) return;
       if (streamBufferedAt(time)) return;
       if (streamRestartTimer) clearTimeout(streamRestartTimer);
       streamRestartTimer = setTimeout(function () {
@@ -2706,13 +2713,19 @@
       pgsImg.style.display = '';
       var cached = pgsCache[idx];
       if (cached) { pgsImg.src = cached; return; }
+      // 未命中：先把上一张位图从画面上摘掉再等回包。否则解码的几十到几百毫秒里旧图还挂着
+      // （而 layoutPgsImg 已经按新事件摆好坐标），seek 落点会显示成上一条字幕的内容。
+      // 回包只认「token 未变 + pgsActiveIdx 仍是这一条」：期间 idx 变过就只入缓存不覆盖画面，
+      // 迟到回包不会盖掉当前图。
+      pgsImg.removeAttribute('src');
+      pgsImg.style.display = 'none';
       var token = pgsToken;
       invoke('pgs_image', { index: idx }).then(function (b64) {
         if (token !== pgsToken) return;
         var url = 'data:image/png;base64,' + b64;
         pgsCache[idx] = url;
         pgsTrimCache(idx);
-        if (pgsActiveIdx === idx && pgsImg) pgsImg.src = url;
+        if (pgsActiveIdx === idx && pgsImg) { pgsImg.src = url; pgsImg.style.display = ''; }
       }).catch(function () { });
     }
 

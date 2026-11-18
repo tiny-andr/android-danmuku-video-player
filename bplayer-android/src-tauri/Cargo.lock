@@ -165,7 +165,7 @@ dependencies = [
 
 [[package]]
 name = "bplayer-android"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "libpgs",
  "png 0.17.16",
