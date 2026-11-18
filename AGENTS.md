@@ -76,6 +76,20 @@ adb shell am force-stop com.danmuku.bplayer.android
 adb shell monkey -p com.danmuku.bplayer.android -c android.intent.category.LAUNCHER 1
 ```
 
+**改完代码给人验收时，debug 和 release 必须一起构建、一起装。** 只更 debug 会让正式包停在旧代码上，
+同一台手机里两个包行为不一致，验收的人无法判断改动到底生效没有。两个包用同一个构建戳：
+
+```powershell
+$env:BPLAYER_BUILD_STAMP = Get-Date -Format 'MMdd-HHmm'
+npm run android:build                          # arm64 debug
+npm run android:build:release                  # arm64 release，同一时间戳
+adb install -r src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk
+adb install -r src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk
+```
+
+首页版本行显示构建戳（debug 为 `v0.1.4 · debug 1118-0952`，release 为 `v0.1.4 · 1118-0952`）。
+两包戳相同 = 同一次代码；手机上戳比刚构建的旧 = 包没装上。
+
 产物：`bplayer-android/src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk`（构建产物与 `node_modules`、`target`、Gradle `build/` 均已 gitignore）。
 
 ## 已验证 / 已知限制
@@ -91,3 +105,4 @@ Audio conversion now works through the Android native bridge: local DTS/TrueHD/A
 - 播放列表曾因同样的 animation transform 永远展开，必须用 `!important` 压回 `translateX`。
 - 弹幕/字幕/音轨浮窗在桌面是 `position:fixed; right:16px; bottom:64px`，手机上统一改成底部面板，z-index 必须高于全屏舞台。
 - WebView 中 `crossOrigin` 媒体与 asset 协议有关；Range 上限约 1 MB。
+- 上传 APK 到 GitHub Release：debug 包必须排在正式包**下面**，但 GitHub 的资产列表**按文件名排序、不是上传顺序**（上传先后对显示毫无影响）。`Bplayer-Android-0.1.4-debug.apk` 与 `Bplayer-Android-0.1.4.apk` 在第 21 个字符处是 `-`(0x2D) vs `.`(0x2E)，`-` 更小，所以 debug 会永远顶在最上面、用户一眼点错（debug 包带 `.debug` 包名、与正式包不覆盖安装、体积大一倍）。修法是把版本号后移：debug 命名成 `Bplayer-Android-debug-<ver>.apk`，正式包是 `Bplayer-Android-<ver>.apk`，这样 `0`(0x30) < `d`(0x64)，正式包才排前面。`UpdateChecker` 用 `contains("debug")` 区分轨道，改名不影响自动更新。

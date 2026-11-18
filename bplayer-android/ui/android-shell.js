@@ -549,10 +549,13 @@
     var text = appVersionSeen || normalizeAppVersion(window.__BplayerAppVersion);
     // 已知：· v0.1.0；未知：· 版本 —（继承副标题的小字颜色，不额外抢眼）
     // debug 包额外标出来：两个包共存时首页必须能一眼分辨。
+    // 同时带上构建时间戳（原生桥给 "debug 1118-0952" / "1118-0955"）：
+    // 两种包共用一个 versionName，没有它就分不出手机上装的是不是刚构建的那份。
     var tag = document.getElementById("mDebugTag");
-    var isDebug = buildKind() === "debug";
+    var kind = buildKind();
+    var isDebug = kind.indexOf("debug") === 0;
     if (tag) tag.hidden = !isDebug;
-    node.textContent = (text ? " · v" + text : " · 版本 —") + (isDebug ? " · debug" : "");
+    node.textContent = (text ? " · v" + text : " · 版本 —") + (kind ? " · " + kind : "");
     return true;
   }
 

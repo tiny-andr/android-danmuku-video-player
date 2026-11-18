@@ -57,9 +57,8 @@ internal object AudioMedia {
   fun validCache(probe: JSONObject, identity: String, audioIndex: Int, sourceDuration: Double?,
     sourceModified: Long?, cacheModified: Long?, exactDuration: Boolean = true): Pair<Boolean, Double>? {
     val streams = streams(probe)
-    // 不再限定 aac/2ch：copy 抽出的缓存保留原编码（AC-3 5.1 等），
-    // 只要求「单条音频流」，时长与 tags 的校验在后面兜底。
-    if (streams.size != 1 || streams[0].optString("codec_type") != "audio") return null
+    if (streams.size != 1 || streams[0].optString("codec_type") != "audio" ||
+      streams[0].optString("codec_name") != "aac" || streams[0].optInt("channels") != 2) return null
     val length = duration(probe) ?: return null
     if (length <= 0) return null
     if (sourceDuration != null) {

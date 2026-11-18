@@ -1,6 +1,6 @@
 {
   "name": "bplayer-android",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "private": true,
   "description": "Bplayer Android 移植（Tauri 2）",
   "//scripts": "npm run check = 纯 Node 回归检查（不需要设备、不需要 CDP，可在任何机器上跑）。npm run check:device = 真机 CDP/ADB 回归，前置条件：1) 手机已 adb 连接（可选 ANDROID_SERIAL）；2) 应用已启动并通过 `adb forward tcp:9223 localabstract:webview_devtools_remote_<pid>` 把 WebView devtools 端口映射出来（默认 CDP_PORT=9223，可覆盖）；3) 这些脚本会修改系统设置、方向和播放状态，不要放进 check。",

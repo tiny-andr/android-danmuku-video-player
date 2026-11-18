@@ -162,13 +162,11 @@ internal object AudioWorkerValidation {
   fun startTime(probe: JSONObject, index: Int): Double? = signed(audioStreams(probe).getOrNull(index)?.opt("start_time"))
   fun containerStart(probe: JSONObject): Double? = signed(probe.optJSONObject("format")?.opt("start_time"))
   fun positive(value: Any?): Double? = value?.toString()?.toDoubleOrNull()?.takeIf { it.isFinite() && it > 0 }
-  fun output(probe: JSONObject, expected: Double?, upper: Double?, copy: Boolean = false): Boolean {
+  fun output(probe: JSONObject, expected: Double?, upper: Double?): Boolean {
     val streams = probe.optJSONArray("streams") ?: return false
     if (streams.length() != 1) return false
     val audio = streams.getJSONObject(0)
-    if (audio.optString("codec_type") != "audio") return false
-    // copy 路径保留原编码（AC-3/E-AC-3，可能 5.1）；转码路径必须是 AAC 2ch。
-    if (!copy && (audio.optString("codec_name") != "aac" || audio.optInt("channels") != 2)) return false
+    if (audio.optString("codec_type") != "audio" || audio.optString("codec_name") != "aac" || audio.optInt("channels") != 2) return false
     val duration = positive(audio.opt("duration")) ?: positive(probe.optJSONObject("format")?.opt("duration")) ?: return false
     if (expected != null && kotlin.math.abs(duration - expected) > maxOf(2.0, expected * 0.005)) return false
     if (upper != null && duration > upper + maxOf(2.0, upper * 0.005)) return false
@@ -214,7 +212,7 @@ class AudioDecodeService : Service() {
     val durationMs: Long = Math.round((endSample - startSample) * 1000.0 / rate)
   }
 
-  private inner class Job(val id: String, val input: String, val index: Int, val durationUs: Long, val tags: List<String>, val client: Messenger, val convert: Boolean, val copy: Boolean = false) {
+  private inner class Job(val id: String, val input: String, val index: Int, val durationUs: Long, val tags: List<String>, val client: Messenger, val convert: Boolean) {
     var sessionId: Long? = null
     val lifecycle = AudioWorkerLifecycle()
     val finished: Boolean get() = !lifecycle.running
@@ -327,7 +325,7 @@ class AudioDecodeService : Service() {
       val duration = data.getLong("durationUs", 0)
       require(duration >= 0)
       val tags = AudioWorkerValidation.metadata(data.getString("tags") ?: "{}")
-      Job(id, input, index, duration, tags, client, message.what == AudioWorkerProtocol.CONVERT, data.getBoolean("copy", false))
+      Job(id, input, index, duration, tags, client, message.what == AudioWorkerProtocol.CONVERT)
     } catch (_: Exception) { send(client, AudioWorkerProtocol.ERROR, id, "音轨任务参数无效"); return }
     active = job
     try { client.binder.linkToDeath(job.death, 0) } catch (_: Exception) { cancel(job); return }
@@ -380,8 +378,7 @@ class AudioDecodeService : Service() {
       require(!job.output.exists())
       job.ownsOutput = true
       main.postDelayed(job.outputLimit, 500L)
-      // copy 抽轨不解码，几百 MB 的轨也是秒级，不需要分片并行。
-      val plan = if (job.copy) null else plan(job)
+      val plan = plan(job)
       if (plan == null) {
         Log.i(TAG, "audio single-pass fallback input=${job.input}")
         convertSingle(job)
@@ -424,15 +421,7 @@ class AudioDecodeService : Service() {
     if (!current(job)) return
     try {
       val args = mutableListOf("-hide_banner", "-nostdin", "-v", "error", "-n", "-probesize", "2097152", "-analyzeduration", "3000000", "-i", job.input,
-        "-map", "0:a:${job.index}", "-vn", "-sn", "-dn", "-map_metadata", "-1")
-      if (job.copy) {
-        // 内核解不了但能整轨搬走的编码（AC-3/E-AC-3）：copy 保留 5.1 声道，
-        // 走 AAC 转码会被 -ac 2 压成立体声。copy 不能再挂 -af（滤镜需要解码）。
-        args.addAll(listOf("-c:a", "copy"))
-      } else {
-        args.addAll(listOf("-c:a", "aac", "-profile:a", "aac_low", "-ac", "2", "-b:a", "192k", "-af", "asetpts=PTS-STARTPTS"))
-      }
-      args.add("-fs"); args.add(AudioWorkerValidation.OUTPUT_SENTINEL_BYTES.toString())
+        "-map", "0:a:${job.index}", "-vn", "-sn", "-dn", "-map_metadata", "-1", "-c:a", "aac", "-profile:a", "aac_low", "-ac", "2", "-b:a", "192k", "-af", "asetpts=PTS-STARTPTS", "-fs", AudioWorkerValidation.OUTPUT_SENTINEL_BYTES.toString())
       args.addAll(job.tags); args.addAll(listOf("-f", "matroska", job.output.absolutePath))
       val session = FFmpegKit.executeWithArgumentsAsync(args.toTypedArray(), { result ->
         main.post { singleDone(job, result) }
@@ -672,7 +661,7 @@ class AudioDecodeService : Service() {
 
   private fun validate(job: Job) {
     probe(job, job.output.absolutePath) { json ->
-      if (!AudioWorkerValidation.output(json, job.expected, job.upper, job.copy)) { fail(job, "转换后的音轨验证失败"); return@probe }
+      if (!AudioWorkerValidation.output(json, job.expected, job.upper)) { fail(job, "转换后的音轨验证失败"); return@probe }
       complete(job, JSONObject().put("path", job.output.absolutePath).put("size", job.output.length()).put("probe", json).put("durationVerified", job.expected != null).toString())
     }
   }

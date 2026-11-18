@@ -1,6 +1,6 @@
 [package]
 name = "bplayer-android"
-version = "0.1.4"
+version = "0.1.5"
 description = "Bplayer Android 移植验证工程"
 edition = "2021"
 

@@ -28,7 +28,7 @@ internal class AndroidAudioNative(context: Context, private val webView: WebView
     { task -> Thread(task, "audio-task").apply { isDaemon = true } })
   private data class Task(val session: String, val cancellation: AudioCancellation)
   private data class Permit(val jobId: String, val session: String, val video: String, val audioIndex: Int,
-    val stat: RemoteStat, val identity: String, val offset: Double, val duration: Double?, val exactDuration: Boolean, val created: Long, val copy: Boolean = false)
+    val stat: RemoteStat, val identity: String, val offset: Double, val duration: Double?, val exactDuration: Boolean, val created: Long)
   private val tasks = ConcurrentHashMap<String, Task>()
   private val permits = ConcurrentHashMap<String, Permit>()
   private val streams = ConcurrentHashMap<String, StreamState>()
@@ -102,7 +102,7 @@ internal class AndroidAudioNative(context: Context, private val webView: WebView
                     source.unchanged(stat, identity)
                     permits.entries.removeIf { System.currentTimeMillis() - it.value.created > 120000 }
                     if (permits.size >= 16) throw NetworkFailure("待处理音轨任务过多，请重新打开影片")
-                    permits[jobId] = Permit(jobId, session, video, index, stat, identity, offset, duration, exact != null, System.currentTimeMillis(), args.optBoolean("copyAudio", false))
+                    permits[jobId] = Permit(jobId, session, video, index, stat, identity, offset, duration, exact != null, System.currentTimeMillis())
                     reply(id, true, JSONObject().put("jobId", jobId).put("target", target).put("cached", false).put("offset", offset))
                   }
                 }
@@ -234,7 +234,6 @@ internal class AndroidAudioNative(context: Context, private val webView: WebView
               putInt("audioIndex", permit.audioIndex)
               putLong("durationUs", permit.duration?.let { (it * 1_000_000).toLong() } ?: 0L)
               putString("tags", AudioMedia.tags(permit.identity, permit.audioIndex, permit.offset).toString())
-              putBoolean("copy", permit.copy)
             }, cancellation, progress = { progress ->
               event("progress", permit, JSONObject().put("percent", progress.getDouble("percent", -1.0))
                 .put("written", progress.getLong("written", 0)))

@@ -1,4 +1,6 @@
 import java.io.FileInputStream
+import java.text.SimpleDateFormat
+import java.util.Date
 import java.util.Properties
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
@@ -15,6 +17,15 @@ val tauriProperties = Properties().apply {
     }
 }
 
+// Build stamp so a sideloaded APK can be identified at a glance: debug and release share the
+// same versionName, and without this there is no way to tell whether the package installed on
+// the phone is the one that was just built. Both tracks are built with the same
+// BPLAYER_BUILD_STAMP so they stay comparable.
+// Fully qualified `java.text.*` cannot be used here: Gradle's Kotlin DSL shadows `java` with
+// the Project.java extension, so the classes have to come in via import at the top.
+val bplayerBuildStamp: String = System.getenv("BPLAYER_BUILD_STAMP")
+    ?: SimpleDateFormat("MMdd-HHmm").format(Date())
+
 android {
     compileSdk = 37
     namespace = "com.danmuku.bplayer.android"
@@ -26,6 +37,11 @@ android {
         targetSdk = 37
         versionCode = tauriProperties.getProperty("tauri.android.versionCode", "1").toInt()
         versionName = tauriProperties.getProperty("tauri.android.versionName", "1.0")
+        // Build stamp so a sideloaded APK can be identified at a glance: debug and release
+        // share the same versionName, and without this there is no way to tell whether the
+        // package installed on the phone is the one that was just built. Both tracks are
+        // built back to back with the same BPLAYER_BUILD_STAMP so they stay comparable.
+        buildConfigField("String", "BUILD_STAMP", "\"$bplayerBuildStamp\"")
     }
     // Release signing comes from gen/android/keystore.properties, which is never committed.
     // When the file is absent the release build keeps the default debug key so local builds
