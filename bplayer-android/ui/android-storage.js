@@ -164,7 +164,6 @@
       return window.AndroidAudioTasks.request("audio_cache_files", { videoPath: args.videoPath, session: window.AndroidAudioTasks.currentSession });
     }
     if (!isNetwork(path)) return window.__TAURI__.core.invoke(command, args);
-    if (command === "probe_mkv_tracks") return Promise.resolve({ tracks: [], duration_us: null });
     if (command === "clean_sidecar_tmp") return Promise.resolve(0);
     if (command === "sidecar_cache_files") return Promise.resolve([]);
     if (["list_dir", "fs_stat", "read_text", "read_bytes", "scan_folder", "pair_danmaku", "scan_subtitles"].includes(command)) {

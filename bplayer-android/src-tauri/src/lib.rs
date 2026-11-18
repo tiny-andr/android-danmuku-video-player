@@ -22,10 +22,9 @@ fn read_sidecar(path: &Path) -> Result<Vec<u8>, String> {
 }
 
 mod blocking;
-mod http_range;
-mod mkv_probe;
-mod mkv_sub;
-mod pgs_render;
+// http_range / mkv_probe / mkv_sub / pgs_render are parked: libmpv now demuxes the container
+// and renders subtitles (text, ASS and PGS) itself, so nothing here parses MKV or decodes PGS.
+// The sources live in tmp/parked-rust/ until the port is merged.
 
 use crate::blocking::blocking;
 
@@ -288,13 +287,6 @@ async fn read_text(path: String) -> Result<String, String> {
     .await?
 }
 
-/// 探测 MKV/WebM 轨道。虽然只读文件头部，但 open + 多次 read/seek 在网络存储上
-/// 每次都是往返，仍属于阻塞 IO，搬进阻塞线程池。
-#[tauri::command]
-async fn probe_mkv_tracks(path: String) -> Result<mkv_probe::MkvProbe, String> {
-    blocking(move || mkv_probe::probe(&path)).await?
-}
-
 // ---------------- Android 文件浏览器 ----------------
 
 #[derive(Serialize)]
@@ -417,99 +409,10 @@ fn transcode_audio_start(_video_path: String, _audio_index: i64, _duration_us: O
     Err("Android 版尚未打包 ffmpeg，音轨转码待 P3".into())
 }
 
-/// 抽取内嵌文本字幕（纯内存，不落盘），返回 `[{ index, text }]`，`text` 是 SRT 文本。
-///
-/// 走 `mkv_sub::sparse_extract_srt`：按 MKV 的 Cues 索引 seek 到每条字幕 block，
-/// 只读字幕那几 MB（桌面实测 35.6 GB UHD 片源读 13.4 MB），不顺序扫整片。
-///
-/// 与桌面版的差异：桌面版抽不出来会回退 ffmpeg 顺序扫一遍；安卓安装包里没有 ffmpeg，
-/// 也没有 spawn 子进程的通道，所以抽不出来的轨直接跳过（不进返回数组，不返回空文本）。
-/// 一条都没抽出来时返回 Err —— 前端会弹出具体原因，而不是显示"正在后台抽取"的假进度。
-///
-/// 一条轨要随机读几十到上千个块，在 /sdcard 的 FUSE 或 SMB 挂载上是秒级 IO，
-/// 必须 async + blocking 离开单线程 IPC 通道（见 blocking.rs）。
-#[tauri::command]
-async fn extract_subtitle_text(
-    video_path: String,
-    subs: Vec<mkv_sub::SubTrack>,
-    duration_us: Option<u64>,
-) -> Result<serde_json::Value, String> {
-    blocking(move || extract_subtitle_text_impl(video_path, subs, duration_us)).await?
-}
-
-/// 一条抽好的字幕：`index` 原样回传给前端（靠它认领轨道），`text` 为 SRT 文本。
-#[derive(Serialize)]
-struct SubText {
-    index: usize,
-    text: String,
-}
-
-fn extract_subtitle_text_impl(
-    video_path: String,
-    subs: Vec<mkv_sub::SubTrack>,
-    _duration_us: Option<u64>,
-) -> Result<serde_json::Value, String> {
-    let src = PathBuf::from(&video_path);
-    if !src.is_file() {
-        return Err("源视频不存在".into());
-    }
-    let mut ready: Vec<SubText> = Vec::new();
-    let mut failed: Vec<String> = Vec::new();
-    for sub in subs {
-        match mkv_sub::sparse_extract_srt(&src, sub.track, sub.ass) {
-            Ok(srt) if !srt.trim().is_empty() => ready.push(SubText { index: sub.index, text: srt }),
-            Ok(_) => failed.push(format!("轨 {}: 解析结果为空", sub.track)),
-            Err(error) => failed.push(format!("轨 {}: {error}", sub.track)),
-        }
-    }
-    if ready.is_empty() && !failed.is_empty() {
-        return Err(format!(
-            "内嵌字幕无法稀疏抽取（Android 没有 ffmpeg 兜底）：{}",
-            failed.join("；")
-        ));
-    }
-    serde_json::to_value(ready).map_err(|error| error.to_string())
-}
-
+/// 与 `transcode_audio_start` 配套的空实现：前端换片/退出时仍会调它，保留注册。
 #[tauri::command]
 fn transcode_audio_cancel() -> Result<bool, String> {
     Ok(false)
-}
-
-/// 网络源的内嵌字幕抽取。
-///
-/// 和本地版共用 `mkv_sub` 的稀疏解析（按 Cues 只读字幕块），区别只在字节来源：
-/// 网络源在 Android 上没有可挂载路径，这里走本机媒体代理的 HTTP Range。
-/// 不这么做就只能让 ffmpeg 顺序读整片（实测 7.5 GB 的片要四十分钟），
-/// 与桌面版"几秒抽完"完全不是一个量级。
-#[tauri::command]
-async fn extract_subtitle_text_url(
-    url: String,
-    size: u64,
-    subs: Vec<mkv_sub::SubTrack>,
-    duration_us: Option<u64>,
-) -> Result<serde_json::Value, String> {
-    blocking(move || {
-        let _ = duration_us;
-        if size == 0 {
-            return Err("远端文件为空，无法抽取字幕".to_string());
-        }
-        let mut reader = http_range::HttpRangeReader::new(url, size);
-        let mut ready: Vec<SubText> = Vec::new();
-        let mut failed: Vec<String> = Vec::new();
-        for sub in subs {
-            match mkv_sub::sparse_extract_srt_reader(&mut reader, sub.track, sub.ass) {
-                Ok(srt) if !srt.trim().is_empty() => ready.push(SubText { index: sub.index, text: srt }),
-                Ok(_) => failed.push(format!("轨 {}: 解析结果为空", sub.track)),
-                Err(error) => failed.push(format!("轨 {}: {error}", sub.track)),
-            }
-        }
-        if ready.is_empty() && !failed.is_empty() {
-            return Err(format!("内嵌字幕无法稀疏抽取：{}", failed.join("；")));
-        }
-        serde_json::to_value(ready).map_err(|error| error.to_string())
-    })
-    .await?
 }
 
 /// 旧桌面版清理半成品缓存的入口，Android 上是**有意的空实现**。
@@ -523,33 +426,6 @@ fn clean_sidecar_tmp(_video_path: String) -> Result<(), String> {
     Ok(())
 }
 
-/// 打开一条 PGS 位图字幕轨：抽取 + RLE 解码 + 合成 PNG 事件表，返回索引
-/// `{ canvas_w, canvas_h, events: [{start,end,x,y,w,h}] }`（时间单位毫秒）。
-/// 抽取一次几秒（手机 /sdcard 走 FUSE 会更慢），必须 async + 阻塞线程池，
-/// 否则整条串行 invoke 通道会被堵住（见 blocking.rs）。
-#[tauri::command]
-async fn pgs_open(video_path: String, track: u64) -> Result<pgs_render::PgsIndex, String> {
-    pgs_render::open(video_path, track).await
-}
-
-/// 取一条事件的 PNG（裸 base64，前端自己拼 `data:image/png;base64,`）。纯内存，保持同步。
-#[tauri::command]
-fn pgs_image(index: u32) -> Result<String, String> {
-    pgs_render::image(index)
-}
-
-/// 释放当前 PGS 文档（位图字幕关闭/切片/换轨时调用）。纯内存，保持同步。
-#[tauri::command]
-fn pgs_close() -> Result<(), String> {
-    pgs_render::close()
-}
-
-/// 当前播放时刻（秒）对应的事件下标；无文档或不在任何事件区间返回 null。
-#[tauri::command]
-fn pgs_current(t: f64) -> Option<u32> {
-    pgs_render::event_at(t)
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -560,7 +436,6 @@ pub fn run() {
             read_text,
             read_bytes,
             scan_subtitles,
-            probe_mkv_tracks,
             list_dir,
             app_version,
             pick_video,
@@ -571,14 +446,8 @@ pub fn run() {
             sidecar_cache_files,
             transcode_target,
             transcode_audio_start,
-            extract_subtitle_text,
-            extract_subtitle_text_url,
             transcode_audio_cancel,
-            clean_sidecar_tmp,
-            pgs_open,
-            pgs_image,
-            pgs_close,
-            pgs_current
+            clean_sidecar_tmp
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

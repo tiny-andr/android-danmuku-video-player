@@ -147,6 +147,14 @@
       "body.m-playing{overflow:hidden;}" +
       "body.m-playing .wrap{padding:0!important;height:100vh!important;}" +
       "body.m-playing .placeholder{display:none!important;}" +
+      /* 首页的「打开视频 / 打开文件夹 / 播放列表 / 设置」工具条在播放页必须收起：
+       * 播放页的等价入口在 #mTop（音轨/字幕/设置/竖屏/i/播放列表），两条工具条叠在
+       * 同一个位置，而 #mTop 会跟着控件自动隐藏——一旦它淡出，首页工具条就从底下露出来。 */
+      "body.m-playing .toolbar{display:none!important;}" +
+      /* 桌面版的信息条（时长/分辨率/大小/弹幕数 + 载入弹幕/弹幕屏蔽）在手机上被 #mInfo
+       * 完整替代：同一个 i 按钮打开的面板里有全部条目，而这条常驻 82px 压在画面上，
+       * 弹幕还会从它上面飘过去。 */
+      "body.m-playing .infobar{display:none!important;}" +
       /* .stage 带着 rise 动画的 transform 填充帧（identity 也算 transform），
        * 会成为 fixed 后代的包含块，所以全屏必须落在 .stage 上并清掉 transform。 */
       "body.m-playing .stage{position:fixed!important;inset:0!important;width:100vw!important;" +
@@ -641,7 +649,15 @@
       if (!playing) return;
       navigation.close("danmaku");
       var direction = innerWidth > innerHeight ? "portrait" : "landscape";
-      try { if (window.AndroidUI && window.AndroidUI.setPlaybackOrientation) window.AndroidUI.setPlaybackOrientation(direction); } catch (error) {}
+      try { if (window.AndroidUI && window.AndroidUI.setPlaybackOrientation) window.AndroidUI.setPlaybackOrientation(direction); } catch (e) { }
+      // 平板（sw>=600dp）系统会丢弃方向请求：1.2s 后窗口还没转，就改走软横屏（转画面+弹幕）。
+      if (window.AndroidMpv && window.__softLandscape) {
+        if (direction === "landscape") {
+          setTimeout(function () { if (innerWidth <= innerHeight) window.__softLandscape(true); }, 1200);
+        } else {
+          window.__softLandscape(false);
+        }
+      }
       var art = window.Bplayer && window.Bplayer.art;
       if (art) art.controls.show = true;
     });
@@ -773,7 +789,9 @@
     document.getElementById("mLoadingMessage").textContent = "正在打开视频…";
     document.getElementById("mLoadingRetry").hidden = true;
     setImmersive(true); setPlaybackActive(true); window.AndroidGestures.setActive(false);
-    loadTimer = setTimeout(function () { failLoading("连接或缓冲超时，请检查网络后重试。"); }, 30000);
+    // libmpv 要先把容器头读完才能报 duration/track-list：7.5 GB 的蓝光 remux 冷读要几十秒，
+    // 30 秒的窗口会把它误判成网络超时。原生解码走长窗口，WebView 那条老路径保持原样。
+    loadTimer = setTimeout(function () { failLoading("连接或缓冲超时，请检查网络后重试。"); }, window.AndroidMpv ? 120000 : 30000);
   }
 
   function sourceLoading(url) {
@@ -800,6 +818,9 @@
   function cancelLoading() { exitPlaying(); }
 
   function releaseVideo() {
+    // mpv 的画面在 WebView 底下的 TextureView 上，光清 <video> 不会让它停下 —— 最后一帧会
+    // 一直挂在那儿透过透明页面显示。先停原生解码，再走原来的清空逻辑。
+    try { if (window.AndroidNativePlayer) window.AndroidNativePlayer.close(); } catch (error) {}
     var art = window.Bplayer && window.Bplayer.art;
     if (!art || !art.video) return;
     try { art.pause(); art.video.removeAttribute("src"); art.video.load(); } catch (error) {}

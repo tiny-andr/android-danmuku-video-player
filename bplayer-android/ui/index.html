@@ -105,6 +105,19 @@
     box-shadow: 0 24px 70px -28px rgba(251, 114, 153, .28), 0 14px 50px -24px rgba(123, 92, 255, .30);
   }
   #player { width: 100%; height: 100%; }
+  /* libmpv 把画面渲染在本窗口底层的 SurfaceView 上（WebView 之下）。播放页必须让出背景，
+     否则这一层黑底会把视频整个盖住；首页/文件浏览页保持原样，渐变背景不受影响。 */
+  body.aplaying,
+  body.aplaying .stage,
+  body.aplaying #player,
+  body.aplaying .art-video-player,
+  body.aplaying .art-video-player .art-video {
+    background: transparent !important;
+  }
+  body.aplaying .stage {
+    border-color: transparent !important;
+    box-shadow: none !important;
+  }
   .placeholder {
     position: absolute; inset: 0; z-index: 5; cursor: pointer; text-align: center;
     display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px;
@@ -456,7 +469,7 @@
     <div id="audioStatus" class="block-foot" role="status"></div>
     <div id="audioTrackList"></div>
     <button type="button" id="audioCancel" class="sidecar-action" hidden>取消本次音轨处理</button>
-    <div class="block-foot">只处理选中的音轨，视频和弹幕保持不变。完成的 AAC 音频保存为同目录 .mka 缓存；首次处理需等待。AC-4／DRA 等转换器不支持的编码会明确报错。</div>
+    <div class="block-foot" id="audioFootNote">只处理选中的音轨，视频和弹幕保持不变。完成的 AAC 音频保存为同目录 .mka 缓存；首次处理需等待。AC-4／DRA 等转换器不支持的编码会明确报错。</div>
   </div>
 
   <div class="block-panel" id="subtitlePanel" hidden>
@@ -566,7 +579,8 @@
 
 <script src="vendor/artplayer.js"></script>
 <script src="vendor/artplayer-plugin-danmuku.js"></script>
-<script src="vendor/artplayer-plugin-audio-track.js"></script>
+<script src="android-native-timeline.js"></script>
+<script src="android-native-player.js"></script>
 <script src="android-navigation.js"></script>
 <script src="android-audio.js"></script>
 <script src="android-file-order.js"></script>
@@ -1003,7 +1017,7 @@
     option.danmuku = danmakuList;
     option.SPEED = { min: 0, max: SPEED_STEPS.length - 1, steps: SPEED_STEPS };
 
-    art = new Artplayer({
+    var artOptions = {
       container: $('player'),
       url: '',
       volume: isMobile ? 1 : 0.5,
@@ -1020,7 +1034,14 @@
       theme: '#fb7299',
       lang: 'zh-cn',
       plugins: [artplayerPluginDanmuku(option)]
-    });
+    };
+    if (window.AndroidNativePlayer) {
+      // 解码在原生 libmpv：art 拿到一个不加载媒体的假 video，时间轴由桥提供。
+      // 弹幕插件只认 art.currentTime / art.playing，所以它感知不到这次替换。
+      window.AndroidNativePlayer.attach();
+      artOptions.proxy = window.AndroidNativePlayer.proxy();
+    }
+    art = new Artplayer(artOptions);
 
     // 必须在首次给 src 之前声明 CORS：视频走 http://asset.localhost，页面在
     // http://tauri.localhost，两者跨域。没有 CORS 授权时 createMediaElementSource
@@ -1785,15 +1806,6 @@
         autoEnabled: function () { return appSettings.autoAudio; },
         cachedProbe: readAudioProbeCache,
         rememberProbe: writeAudioProbeCache,
-        // 流式接管：需要转码的音轨先边转边播（MSE）。返回 false 就原样走整段转码。
-        // 无论走不走流式，先把上一路停掉：换轨/取消时旧流不能留在后台占 CPU 和磁盘。
-        stream: function (options) {
-          stopStreamAudio();
-          if (!streamSupported()) return Promise.resolve(false);
-          var from = Number(art && art.currentTime) || 0;
-          diag('stream-hook', { index: options.audioIndex, from: Math.round(from * 10) / 10 });
-          return startStreamAudio(options.audioIndex, from, options.session);
-        },
         probing: function () {
           audioProbeInFlight = true;
           audioStatus('正在识别音轨…', false);
@@ -1814,7 +1826,7 @@
         // 停流不变式：select() 的 cached / disabled / error 三个出口只 emit 本钩子、不调
         // hooks.stream，若这里不停流，旧一路流式转码（ffmpeg + MSE）会继续在后台占 CPU
         // 和磁盘。stopStreamAudio 自身幂等（无流时只清定时器），重复调用无副作用。
-        resetTrack: function () { stopStreamAudio(); if (audioTrack) audioTrack.reset(); externalOrdinal = -1; },
+        resetTrack: function () { if (audioTrack) audioTrack.reset(); externalOrdinal = -1; },
         isolate: function () {
           if (!isolateVideoAudio()) throw new Error('无法隔离原视频音频，已拒绝同时播放两条声音');
         },
@@ -1898,8 +1910,6 @@
       var kind = subPillKind;
       if (!kind) return;
       if (kind === 'pgs') {
-        pgsToken++;
-        try { invoke('pgs_close').catch(function () { }); } catch (error) { }
       } else {
         subExtractToken++;
         pendingSub = null;
@@ -1962,308 +1972,10 @@
       diag('video-audio-released');
     }
 
-    // ---- 流式音轨（MSE）：内核解不了的音轨边转边播，不用等整条转完 ----
-    // Windows 端是「ffmpeg 转 fMP4 → stdout 管道 → MSE」；安卓这边 FFmpegKit 把 stdout 当成
-    // 日志接管了，拿不到二进制，所以换成「ffmpeg 写增长文件 → 原生按 ISO-BMFF box 边界增量读
-    // → 前端 pull」。控制流和桌面版一致：只有队列见底才拉下一块，天然背压。
-    var STREAM_MIME = 'audio/mp4; codecs="mp4a.40.2"';
-    var STREAM_CHUNK_BYTES = 131072;
-    var STREAM_QUEUE_BYTES = 2 * 1024 * 1024;
-    var streamAudio = null;
-    var streamRestartTimer = 0;
-    var streamTrimTimer = 0;
-    var streamTick = 0;
-    var STREAM_AHEAD_MAX = 120;   // 缓冲领先播放头超过这么多秒就停止消费（背压）
-    var STREAM_KEEP_BACK = 60;    // 播放头之前保留这么多秒供回拖，再往前回收
-
-    function streamSupported() {
-      return !!(window.MediaSource && typeof MediaSource.isTypeSupported === 'function'
-        && MediaSource.isTypeSupported(STREAM_MIME));
-    }
-
-    function streamPlayhead() {
-      var t = Number(art && art.currentTime) || 0;
-      // NaN 参与比较永远为 false：算不出来时「领先太多要停手」会被判成「继续拉」，
-      // 一路把 MSE 配额拉爆，所以这里必须给出确定的数。
-      return isFinite(t) && t > 0 ? t : 0;
-    }
-
-    function streamBufferedEnd(s) {
-      if (!s || !s.sb) return 0;
-      try { var b = s.sb.buffered; return b.length ? b.end(b.length - 1) : 0; } catch (error) { return 0; }
-    }
-
-    function streamAheadFull(s) {
-      return (streamBufferedEnd(s) - streamPlayhead()) > STREAM_AHEAD_MAX;
-    }
-
-    // 回收播放头之前的老缓冲。
-    //
-    // MediaSource 只进不出：长片播到后面时 buffered 是从片头一路攒到播放头的，
-    // 192k AAC 播两三个小时就是上百 MB，必然撞上 SourceBuffer 配额。每次把「播放头
-    // 前 60 秒」以外的部分 remove 掉，占用就恒定为「回看 60 + 前瞻 120」≈ 4 MB。
-    // 返回 true 表示刚发起 remove（它还会触发一次 updateend，届时继续 append）。
-    function trimStreamBuffer() {
-      var s = streamAudio;
-      if (!s || s.stopped || !s.sb || s.sb.updating) return false;
-      // ended 之后 SourceBuffer.remove 会抛 InvalidStateError；短片转完就 ended，确实不需要再回收。
-      if (!s.ms || s.ms.readyState !== 'open') return false;
-      var b;
-      try { b = s.sb.buffered; } catch (error) { return false; }
-      if (!b.length) return false;
-      var now = streamPlayhead();
-      if (!now) now = s.startSecs;
-      var keepFrom = now - STREAM_KEEP_BACK;
-      var first = b.start(0);
-      if (keepFrom > first + 5) {
-        try {
-          s.sb.remove(first, keepFrom);
-          diag('stream-trim', { from: Math.round(first), to: Math.round(keepFrom), now: Math.round(now) });
-          return true;
-        }
-        catch (error) { diag('stream-trim-fail', { err: String(error) }); }
-      }
-      return false;
-    }
-
-    // 每秒驱动一次消费 + 每 5 秒回收：转码远快于播放，数据一次性到齐后不会再有
-    // updateend，光靠 append 回调既消费不完也回收不了。
-    function startStreamTicker() {
-      if (streamTrimTimer) clearInterval(streamTrimTimer);
-      streamTrimTimer = setInterval(function () {
-        if (!streamAudio) { clearInterval(streamTrimTimer); streamTrimTimer = 0; return; }
-        appendStreamChunk();
-        if ((streamTick++ % 5) === 0) trimStreamBuffer();
-      }, 1000);
-    }
-
-    function stopStreamAudio() {
-      if (streamTrimTimer) { clearInterval(streamTrimTimer); streamTrimTimer = 0; }
-      if (streamRestartTimer) { clearTimeout(streamRestartTimer); streamRestartTimer = 0; }
-      var s = streamAudio;
-      if (!s) return;
-      streamAudio = null;
-      s.stopped = true;
-      if (s.settle) s.settle(false);   // 还在等「是否成功」的 select 立刻拿到 false，好回落到整段转码
-      try { if (s.sb) { s.sb.removeEventListener('updateend', onStreamUpdateEnd); } } catch (error) { }
-      if (s.id) {
-        try {
-          window.AndroidAudioTasks.request('audio_stream_close', { streamId: s.id, session: s.session }, { timeoutMs: 5000 })
-            .catch(function () { });
-        } catch (error) { }
-      }
-      try { if (s.url) URL.revokeObjectURL(s.url); } catch (error) { }
-      try { if (s.ms.readyState === 'open') s.ms.endOfStream(); } catch (error) { }
-      diag('stream-stopped', { id: s.id });
-    }
-
-    function startStreamAudio(audioIndex, from, session) {
-      return new Promise(function (resolve) {
-        if (!streamSupported() || !currentVideoPath || !audioTrack || !session) { resolve(false); return; }
-        stopStreamAudio();
-        var startAt = Math.max(0, Number(from) || 0);
-        window.AndroidAudioTasks.request('audio_stream_open', {
-          videoPath: currentVideoPath, audioIndex: audioIndex, startSecs: startAt, session: session
-        }, { timeoutMs: 30000 }).then(function (opened) {
-          if (!opened || !opened.id) { resolve(false); return; }
-          var ms = new MediaSource();
-          var url = URL.createObjectURL(ms);
-          var total = probeDurationUs ? probeDurationUs / 1000000 : (art && art.duration) || 0;
-          var s = {
-            id: opened.id, session: session, ms: ms, url: url, sb: null, sessionIndex: audioIndex,
-            audioIndex: audioIndex, startSecs: startAt, queue: [], queued: 0,
-            pulling: false, appending: false, eof: false, stopped: false, retries: 0, settle: null
-          };
-          var settled = false;
-          s.settle = function (ok) { if (!settled) { settled = true; resolve(!!ok); } };
-          streamAudio = s;
-          startStreamTicker();
-          ms.addEventListener('sourceopen', function () {
-            if (s.stopped) return;
-            // 同一个 MediaSource 的 sourceopen 会重复触发（sb.remove() 之后实测会再来一次）；
-            // 重复走 addSourceBuffer 会抛 NotSupportedError，把整条流误判成「内核不支持」。
-            if (s.sb) return;
-            try { s.sb = ms.addSourceBuffer(opened.mime || STREAM_MIME); }
-            catch (error) { diag('stream-sb-fail', { err: String(error) }); s.settle(false); stopStreamAudio(); return; }
-            s.sb.mode = 'segments';
-            try { s.sb.timestampOffset = startAt; } catch (error) { }
-            // duration 必须在第一次 append 之前设：empty_moov 下 Chromium 报 Infinity，
-            // 而 append 之后再设会被「低于已缓冲末端」挡回来（InvalidStateError）。
-            if (total > 0) { try { ms.duration = total; } catch (error) { } }
-            s.sb.addEventListener('updateend', onStreamUpdateEnd);
-            s.sb.addEventListener('error', function () { diag('stream-sb-error', {}); });
-            s.settle(true);
-            pullStreamChunk();
-          });
-          // 挂到外挂音轨元素上。offset 必须是 0：SourceBuffer 的 timestampOffset 已经把这
-          // 一路流摆到视频时间轴上（startAt 处），再减一次 offset 会把定位点挪到流外，
-          // 元素就会一直停在 readyState=1 不出声。
-          audioTrack.update({
-            url: url, offset: 0,
-            valid: function () { return streamAudio === s && !s.stopped; },
-            onError: function (error) { diag('stream-audio-error', { err: String(error) }); },
-            // 网络源首块可能要十几秒：等「对齐」的超时按流式放宽，否则元素先被释放、
-            // 后面的数据全白拉了
-            timeoutMs: 90000
-          }).catch(function (error) { diag('stream-mount-fail', { err: String(error) }); });
-          bindStreamSeekWatch();
-          diag('stream-start', { from: startAt, index: audioIndex, total: total });        }).catch(function (error) {
-          diag('stream-open-fail', { err: String(error) });
-          resolve(false);
-        });
-      });
-    }
-
-    function appendStreamChunk() {
-      var s = streamAudio;
-      if (!s || s.stopped || !s.sb || s.appending || !s.queue.length || s.sb.updating) return;
-      if (!s.eof && streamAheadFull(s)) return; // 窗口满了就先攒着，等播放把位置腾出来
-      var chunk = s.queue.shift();
-      s.appending = true;
-      s.queued = Math.max(0, s.queued - chunk.length);
-      try { s.sb.appendBuffer(chunk); }
-      catch (error) {
-        s.appending = false;
-        // 缓冲吃满：丢掉已经播过去的部分再塞回去，不然后面整条流都进不来
-        if (error && error.name === 'QuotaExceededError') {
-          s.queue.unshift(chunk); s.queued += chunk.length;
-          try {
-            var now = Number(art && art.currentTime) || 0;
-            if (now > 20) s.sb.remove(0, now - 20);
-          } catch (failure) { diag('stream-quota-fail', { err: String(failure) }); }
-          return;
-        }
-        diag('stream-append-fail', { err: String(error) });
-        s.stopped = true;
-      }
-    }
-
-    function onStreamUpdateEnd() {
-      var s = streamAudio;
-      if (!s || s.stopped) return;
-      s.appending = false;
-      // 先回收播放头之前的老缓冲，否则长片播两三个小时必炸配额。
-      // remove 会再触发一次 updateend，那次回来时窗口已经挪过，不会再删。
-      if (!s.eof && trimStreamBuffer()) return;
-      if (s.queue.length) { appendStreamChunk(); return; }
-      if (s.eof) { try { if (s.ms.readyState === 'open') s.ms.endOfStream(); } catch (error) { } return; }
-      pullStreamChunk();
-    }
-
-    // 空数据（转码还没落盘 / 网络源卡顿）时退避重试；真正的失败由原生侧的 ERROR 打回
-    function pullStreamChunk() {
-      var s = streamAudio;
-      if (!s || s.stopped || s.eof || s.pulling || !s.sb || s.appending || s.sb.updating) return;
-      if (s.queued >= STREAM_QUEUE_BYTES) return;
-      if (streamAheadFull(s)) return; // 前瞻够了就不拉：原生侧队列满后 ffmpeg 自己阻塞
-      s.pulling = true;
-      window.AndroidAudioTasks.request('audio_stream_read', {
-        streamId: s.id, session: s.session, maxBytes: STREAM_CHUNK_BYTES
-      }, { timeoutMs: 20000 }).then(function (result) {
-        s.pulling = false;
-        if (streamAudio !== s || s.stopped) return;
-        s.retries = 0;
-        if (result && result.eof) {
-          s.eof = true;
-          if (!s.queue.length && !s.appending) { try { if (s.ms.readyState === 'open') s.ms.endOfStream(); } catch (error) { } }
-          diag('stream-eof', {});
-          return;
-        }
-        var bytes = null;
-        if (result && result.data) {
-          try {
-            var bin = atob(result.data);
-            bytes = new Uint8Array(bin.length);
-            for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-          } catch (error) { bytes = null; }
-        }
-        if (bytes && bytes.length) { s.queue.push(bytes); s.queued += bytes.length; appendStreamChunk(); }
-        else setTimeout(pullStreamChunk, 60);
-      }).catch(function (error) {
-        s.pulling = false;
-        if (streamAudio !== s || s.stopped) return;
-        // AbortError = 会话正在切换（换轨/取消），旧流的在途读被主动拒掉了。
-        // 这既不是网络故障也不该重试，等 stopStreamAudio 接手即可。
-        if (error && error.name === 'AbortError') return;
-        s.retries++;
-        diag('stream-read-fail', { err: String(error), retries: s.retries });
-        if (s.retries > 6) {
-          s.stopped = true;
-          toast('音轨流中断：' + (error.message || error), 6000);
-          return;
-        }
-        setTimeout(pullStreamChunk, 200 * s.retries);
-      });
-    }
-
-    // 流式音轨的 seek 监听挂在真正的 video 元素上：`#player video` 在播放器刚挂载时可能还
-    // 查不到（监听就丢了），而 art.video 一定存在。
-    function bindStreamSeekWatch() {
-      var v = (art && art.video) || document.querySelector('video');
-      if (!v || v.__streamSeekBound) return;
-      v.__streamSeekBound = true;
-      v.addEventListener('seeking', function () { scheduleStreamRestart(Number(v.currentTime) || 0); });
-    }
-
-    function streamBufferedAt(time) {
-      var s = streamAudio;
-      if (!s || !s.sb) return false;
-      var b = s.sb.buffered;
-      for (var i = 0; i < b.length; i++) {
-        if (time >= b.start(i) - 0.08 && time <= b.end(i) + 0.08) return true;
-      }
-      return false;
-    }
-
-    // 跳到流没覆盖的位置就重起一路（ffmpeg 重新 seek 编码）。Windows 端同样在 seek 时重起，
-    // 只是那边靠管道，这边靠关文件再开一条。
-    // 注意不能因 eof 短路：转码完成后 s.eof = true，而 trimStreamBuffer() 已经把播放头前
-    // 60 秒的缓冲 remove 掉，用户往回拖就落进空洞 —— 不重起就是永远静音、连提示都没有。
-    // 仍然只在「目标确实不在 buffered 里」时重起（streamBufferedAt 挡在前面），所以
-    // 已缓冲区域内的普通 seek 不会触发重启风暴。
-    function scheduleStreamRestart(time) {
-      var s = streamAudio;
-      if (!s || s.stopped) return;
-      if (streamBufferedAt(time)) return;
-      if (streamRestartTimer) clearTimeout(streamRestartTimer);
-      streamRestartTimer = setTimeout(function () {
-        streamRestartTimer = 0;
-        if (!streamAudio || streamAudio.stopped) return;
-        var t = Number(art && art.currentTime) || 0;
-        if (streamBufferedAt(t)) return;
-        var index = streamAudio.audioIndex;
-        var session = streamAudio.session;
-        stopStreamAudio();
-        diag('stream-restart', { at: Math.round(t * 10) / 10, index: index });
-        startStreamAudio(index, t, session).then(function (ok) {
-          if (!ok) diag('stream-restart-fail', { at: t });
-        });
-      }, 250);
-    }
-
-    // 真机验收探针：从 CDP 直接读流状态，没有 UI 用途，也不影响正常播放
-    window.__bplayerStream = function () {
-      var s = streamAudio;
-      if (!s) return null;
-      var ranges = [];
-      // SourceBuffer 随时可能因为换轨被 detach：读 buffered 会抛 InvalidStateError，探针不该炸
-      try {
-        var b = s.sb ? s.sb.buffered : null;
-        if (b) { for (var i = 0; i < b.length; i++) ranges.push([Math.round(b.start(i) * 100) / 100, Math.round(b.end(i) * 100) / 100]); }
-      } catch (error) { ranges = ['detached']; }
-      var a = audioTrack ? audioTrack.audio : null;
-      return {
-        id: s.id, startSecs: s.startSecs, index: s.audioIndex, eof: s.eof, stopped: s.stopped,
-        queued: s.queued, appending: s.appending, pulling: s.pulling, retries: s.retries,
-        buffered: ranges,
-        audio: a ? {
-          currentTime: Math.round(a.currentTime * 100) / 100, paused: a.paused, readyState: a.readyState,
-          duration: isFinite(a.duration) ? Math.round(a.duration * 100) / 100 : String(a.duration),
-          decodedBytes: a.webkitAudioDecodedByteCount || 0, muted: a.muted, volume: a.volume
-        } : null
-      };
-    };
-
+    // ---- 流式音轨（MSE 边转边播）已下线 ----
+    // libmpv 原生解码所有音轨，不再需要「ffmpeg 分段转码 + MediaSource 增量喂流」这一整套。
+    // 保留空壳是因为退出播放 / 换片 / 切轨几处仍会调用它，语义上「没有流可停」。
+    function stopStreamAudio() { }
     function resetExternalAudio() {
       stopStreamAudio();
       releaseVideoAudio();
@@ -2300,7 +2012,8 @@
         meta.className = 't-meta';
         var compatibility = window.AndroidAudioSession.codec(t.codec);
         var processing = audioSession && audioSession.state && audioSession.state.selectedIndex === i && ['preparing', 'starting', 'running', 'mounting'].includes(audioSession.state.phase);
-        meta.textContent = [codecName(String(t.codec || '').toUpperCase()), t.lang, processing ? '处理中' : (compatibility.needsConversion ? '可转 AAC' : '原生可播／可提取切换')].filter(Boolean).join(' · ');
+        var modeLabel = window.AndroidMpv ? '直接解码' : (compatibility.needsConversion ? '可转 AAC' : '原生可播／可提取切换');
+        meta.textContent = [codecName(String(t.codec || '').toUpperCase()), t.lang, processing ? '处理中' : modeLabel].filter(Boolean).join(' · ');
         item.appendChild(meta);
         item.addEventListener('click', function () { switchAudioTrack(i); });
         list.appendChild(item);
@@ -2369,7 +2082,43 @@
       }).catch(function () { return null; });
     }
 
+    // libmpv 模式：轨道表来自 mpv 自己，字幕由 libass/PGS 直接渲染到画面上，
+    // 不再走「Rust 解容器 → 抽 cue/位图 → 前端贴层」那条链。
+    function buildMpvSubtitleMenu(path, token) {
+      invoke('scan_subtitles', { videoPath: path }).then(function (exts) {
+        if (token !== probeToken) return;
+        var raw = [];
+        try { raw = JSON.parse(window.AndroidMpv.tracks() || '[]'); } catch (error) { raw = []; }
+        subItems = [];
+        var ordinal = 0;
+        raw.forEach(function (t) {
+          if (t.type !== 'sub') return;
+          ordinal++;
+          var codec = String(t.codec || '').toUpperCase();
+          subItems.push({
+            id: 'mpv:' + t.id,
+            kind: 'mpv',
+            sid: t.id,
+            name: t.title || t.lang || ('内嵌字幕' + ordinal),
+            codecLabel: codec === 'HDMV_PGS_SUBTITLE' ? 'PGS 位图' : (codec || '文本'),
+            default: !!t.default,
+          });
+        });
+        (exts || []).forEach(function (f) {
+          subItems.push({ id: 'mpvfile:' + f.path, kind: 'mpvFile', path: f.path, name: f.name, codecLabel: '外挂' });
+        });
+        // mpv 可能已经按 default 自动挂了某条，把高亮对上去
+        if (!mountedSubId) {
+          for (var i = 0; i < raw.length; i++) {
+            if (raw[i].type === 'sub' && raw[i].selected) { mountedSubId = 'mpv:' + raw[i].id; break; }
+          }
+        }
+        refreshSubtitleMenu();
+      }).catch(function () { refreshSubtitleMenu(); });
+    }
+
     function buildSubtitleMenu(path, tracks, token) {
+      if (window.AndroidMpv) return buildMpvSubtitleMenu(path, token);
       invoke('scan_subtitles', { videoPath: path }).then(function (exts) {
         if (token !== probeToken) return;
         subItems = [];
@@ -2467,127 +2216,26 @@
     function mountSubtitle(s, silent) {
       if (s.disabled || !currentVideoPath) return;
       closePanel('subtitlePanel');
-      if (s.kind === 'bitmap') { mountPgsSubtitle(s, silent); return; }
+      if (s.kind === 'mpv') {
+        window.AndroidMpv.setSid(s.sid);
+        mountedSubId = s.id;
+        $('subtitleStatus').textContent = '字幕：' + s.name;
+        refreshSubtitleMenu();
+        return;
+      }
+      if (s.kind === 'mpvFile') {
+        window.AndroidMpv.addSub(s.path, true);
+        mountedSubId = s.id;
+        $('subtitleStatus').textContent = '外挂字幕：' + s.name;
+        refreshSubtitleMenu();
+        return;
+      }
       unmountPgs(); // 从位图字幕切到文本字幕：收起图像层
       if (s.kind === 'ext') return loadSubtitlePath(s.path, silent);
-      // Network videos cannot use the Rust extractor (it needs a real file path), so the
-      // ffmpeg worker pulls the track through the media proxy instead.
-      if (String(currentVideoPath).indexOf('/@network/') === 0) return extractNetworkSubtitle(s, silent);
-      // 内嵌：整条链走内存，不产生缓存文件
-      // 归属令牌必须在 invoke 之前取：回包里再读 currentVideoPath 等于拿它跟自己比，
-      // 恒真且无效，换片后上一部的字幕照样能挂到新片上（桌面版修过同款 bug）。
-      var want = normPath(currentVideoPath);
-      var subToken = ++subExtractToken;
-      pendingSub = s;
-      transcodeVideo = currentVideoPath;
-      transcodeOrdinal = -1;
-      updateSubPill('extract');
-      // 一次把本片所有文本字幕轨都抽出来：有 Cues 索引时每条只要毫秒级
-      var batch = subItems.filter(function (x) { return x.kind === 'embedded' && x.track; })
-        .map(function (x) { return { index: x.ordinal - 1, track: x.track, ass: x.codecLabel === 'ASS' }; });
-      if (!batch.some(function (b) { return b.index === s.ordinal - 1; })) {
-        batch.push({ index: s.ordinal - 1, track: s.track, ass: s.codecLabel === 'ASS' });
-      }
-      invoke('extract_subtitle_text', { videoPath: currentVideoPath, subs: batch, durationUs: probeDurationUs || null }).then(function (got) {
-        if (subToken !== subExtractToken) return; // 用户点了字幕胶囊取消：这份回包作废
-        if (normPath(currentVideoPath) !== want) return; // 已经换片：这份回包作废
-        var hit = (got || []).filter(function (x) { return x.index === s.ordinal - 1; })[0];
-        // 无论成败都要把记账位清掉：Android 没有 ffmpeg 后台管道，也没有人会发
-        // transcode://done 来认领，不清就是一个永远挂着的「字幕」胶囊。
-        pendingSub = null;
-        clearSubPill();   // 只收字幕那颗：同时在跑的音轨转码胶囊不能跟着消失
-        transcodeVideo = '';
-        transcodeOrdinal = -1;
-        if (hit) { mountSubtitleText(hit.text, s, silent); return; }
-        toast('这条内嵌字幕抽不出来（可能缺 Cues 索引或格式不支持）', 8000);
-      }).catch(function (e) {
-        if (subToken !== subExtractToken) return; // 已经点了胶囊取消：别拿一个注定失败的回包去 toast
-        clearSubPill();
-        transcodeVideo = '';
-        pendingSub = null;
-        toast('字幕抽取未能启动：' + e, 8000);
-      });
+      // 内嵌字幕（含 PGS 位图）由 libmpv 直接渲染到画面，这里不再抽取 cue 文本。
+      toast('内嵌字幕由播放器直接渲染，请从字幕菜单选择', 6000);
     }
 
-    // 网络视频的内嵌文本字幕：首选和本地完全相同的稀疏抽取（Rust 解析 Cues，只读字幕块），
-    // 字节来源换成媒体代理的 HTTP Range。只有在稀疏抽取拿不到结果时才退回 ffmpeg 顺序抽取
-    // —— 那条路要读完整片，7.5 GB 的片在手机上要四十分钟，和桌面经验完全对不上。
-    function extractNetworkSubtitle(item, silent) {
-      if (!window.AndroidAudioTasks || !window.AndroidAudioTasks.request) { toast('字幕抽取桥未就绪', 8000); return; }
-      var want = normPath(currentVideoPath);
-      var subToken = ++subExtractToken;
-      var session = window.AndroidAudioTasks.currentSession;
-      var ordinalIndex = Math.max(0, (item.ordinal || 1) - 1);
-      pendingSub = item;
-      transcodeVideo = currentVideoPath;
-      transcodeOrdinal = -1;
-      updateSubPill('extract');
-      // 只抽用户点的那一条：网络源每条轨的每个 cue 都要一次远端小读，三条轨一起抽
-      // 就是三倍等待。本地文件因为 Cues 命中是毫秒级，才可以一次抽整批。
-      var batch = [];
-      if (item.track) batch.push({ index: ordinalIndex, track: item.track, ass: item.codecLabel === 'ASS' });
-      var readerId = '';
-      function closeReader() {
-        if (!readerId) return;
-        var rid = readerId; readerId = '';
-        window.AndroidAudioTasks.request('subtitle_reader_close', { readerId: rid, session: session }).catch(function () { });
-      }
-      function settle(text) {
-        if (subToken !== subExtractToken) return;
-        if (normPath(currentVideoPath) !== want) return;
-        pendingSub = null; clearSubPill(); transcodeVideo = ''; transcodeOrdinal = -1;
-        if (!text) { toast('这条内嵌字幕抽不出来', 8000); return; }
-        mountSubtitleText(text, item, silent);
-      }
-      function fallback(reason) {
-        if (subToken !== subExtractToken) return;
-        diag('subtitle-remote-fallback', { reason: String(reason) });
-        closeReader();
-        window.AndroidAudioTasks.request('network_subtitle', {
-          videoPath: currentVideoPath,
-          trackIndex: ordinalIndex,
-          session: session,
-        }, { timeoutMs: 900000 }).then(function (got) {
-          if (subToken !== subExtractToken) return;
-          if (normPath(currentVideoPath) !== want) return;
-          var path = got && got.path;
-          if (!path) { settle(''); return; }
-          return invoke('read_text', { path: path }).then(function (text) { settle(text); });
-        }).catch(function (error) {
-          if (subToken !== subExtractToken) return;
-          clearSubPill(); transcodeVideo = ''; pendingSub = null;
-          toast('字幕抽取未能启动：' + error, 8000);
-        });
-      }
-      window.AndroidAudioTasks.request('subtitle_reader', { videoPath: currentVideoPath, session: session }, { timeoutMs: 30000 })
-        .then(function (reader) {
-          if (subToken !== subExtractToken) return;
-          if (!reader || !reader.url) { fallback('读取器未就绪'); return; }
-          readerId = reader.readerId;
-          return invoke('extract_subtitle_text_url', {
-            url: reader.url, size: reader.size, subs: batch, durationUs: probeDurationUs || null
-          }).then(function (got) {
-            closeReader();
-            var hit = (got || []).filter(function (x) { return x.index === ordinalIndex; })[0];
-            if (!hit) { fallback('稀疏抽取没有结果'); return; }
-            settle(hit.text);
-          });
-        })
-        .catch(function (error) { fallback(error); });
-    }
-
-    function mountSubtitleText(text, item, silent) {
-      var owner = beginSidecar('subtitle', !silent);
-      var view = ensureSubtitleView();
-      if (!view) return Promise.resolve(false);
-      try {
-        var vtt = window.AndroidSidecars.toVtt(text, item.type || 'srt');
-        return view.load(vtt, function () { return ownsSidecar(owner, 'subtitle'); }).then(function () {
-          if (!ownsSidecar(owner, 'subtitle')) return false;
-          mountedSubId = item.id; applySubtitleStyle(); refreshSubtitleMenu(); return true;
-        }).catch(function (error) { if (ownsSidecar(owner, 'subtitle') && error.name !== 'AbortError') toast('字幕加载失败', 5000); return false; });
-      } catch (error) { return Promise.resolve(false); }
-    }
 
     // 拖入的字幕文件：登记进菜单（同一路径只登记一次），返回菜单条目供立即挂载
     function addDroppedSubtitle(p) {
@@ -2611,217 +2259,12 @@
     }
 
     // ---- PGS 位图字幕 ----
-    // Rust 侧用 libpgs 按 MKV 的 Cues 索引只读字幕块（潘神 35.6 GB 只读 13.4 MB）解出位图，
-    // 这里只负责把它按时钟贴到画面上：不转码、不 OCR、不落盘。
-    var pgsIndexData = null; // { canvas_w, canvas_h, events: [{start,end,x,y,w,h}] }（毫秒）
-    var pgsTrackNo = -1;     // 已挂载的轨道号（MKV TrackNumber）
-    var pgsOwnerPath = '';   // 这份数据属于哪个视频
-    var pgsEl = null;        // 覆盖层容器
-    var pgsImg = null;       // 当前位图
-    var pgsCache = {};       // 事件序号 -> data URL
-    var pgsActiveIdx = -1;
-    var pgsToken = 0;        // 换片/换轨时作废在途请求
-
-    function pgsHost() {
-      if (!art) return null;
-      return (art.template && (art.template.$player || art.template.$container)) || $('player');
-    }
-
-    function ensurePgsLayer() {
-      var host = pgsHost();
-      if (!host) return null;
-      if (!pgsEl || !pgsEl.isConnected || pgsEl.parentElement !== host) {
-        if (pgsEl) pgsEl.remove();
-        pgsEl = document.createElement('div');
-        pgsEl.id = 'pgsLayer';
-        pgsEl.style.cssText = 'position:absolute;inset:0;pointer-events:none;z-index:20;overflow:hidden;display:none';
-        pgsImg = document.createElement('img');
-        pgsImg.alt = '';
-        pgsImg.style.cssText = 'position:absolute;left:0;top:0;width:0;height:0;display:none';
-        pgsEl.appendChild(pgsImg);
-        host.appendChild(pgsEl);
-      }
-      return pgsEl;
-    }
-
-    // 视频显示区域。不能假设 .art-video 是 object-fit:fill —— 实测 Android WebView
-    // 竖屏 contain 时容器 931px 高、画面只占中间约 420px，按容器拉伸会把 PGS 位图
-    // 顶到画面外的黑边上（字幕跑到画面下方几百像素）。这里跟字幕层用同一套
-    // contain/cover 数学，从 video 的真实 rect 和 object-fit 反算可视画面框。
-    function videoContentBox() {
-      var v = art && art.video;
-      var host = pgsEl && pgsEl.parentElement;
-      if (!v || !host || !host.getBoundingClientRect || !v.getBoundingClientRect) return null;
-      var bounds = host.getBoundingClientRect(), media = v.getBoundingClientRect();
-      if (!bounds.width || !bounds.height || !media.width || !media.height) return null;
-      var box = { x: media.left - bounds.left, y: media.top - bounds.top, w: media.width, h: media.height };
-      var vw = v.videoWidth || 0, vh = v.videoHeight || 0;
-      var fit = getComputedStyle(v).objectFit || 'contain';
-      if (vw > 0 && vh > 0 && fit !== 'fill') {
-        var scale = (fit === 'cover' ? Math.max : Math.min)(box.w / vw, box.h / vh);
-        if (fit === 'none') scale = 1;
-        if (fit === 'scale-down') scale = Math.min(1, scale);
-        var dw = vw * scale, dh = vh * scale;
-        box.x += (box.w - dw) / 2; box.y += (box.h - dh) / 2;
-        box.w = dw; box.h = dh;
-      }
-      return box;
-    }
-
-    function layoutPgsImg(ev) {
-      if (!pgsImg || !pgsIndexData) return;
-      var box = videoContentBox();
-      if (!box) return;
-      var sx = box.w / (pgsIndexData.canvas_w || 1920);
-      var sy = box.h / (pgsIndexData.canvas_h || 1080);
-      pgsImg.style.left = (box.x + ev.x * sx) + 'px';
-      pgsImg.style.top = (box.y + ev.y * sy) + 'px';
-      pgsImg.style.width = (ev.w * sx) + 'px';
-      pgsImg.style.height = (ev.h * sy) + 'px';
-    }
-
-    function pgsEventAt(tSec) {
-      if (!pgsIndexData) return -1;
-      var ev = pgsIndexData.events;
-      var t = tSec * 1000;
-      var lo = 0;
-      var hi = ev.length - 1;
-      var best = -1;
-      while (lo <= hi) {
-        var mid = (lo + hi) >> 1;
-        if (ev[mid].start <= t) { best = mid; lo = mid + 1; } else { hi = mid - 1; }
-      }
-      if (best < 0) return -1;
-      return t < ev[best].end ? best : -1;
-    }
-
-    function pgsTrimCache(center) {
-      var keys = Object.keys(pgsCache);
-      if (keys.length < 80) return;
-      keys.forEach(function (k) {
-        if (Math.abs(Number(k) - center) > 40) delete pgsCache[k];
-      });
-    }
-
-    function pgsPump() {
-      if (!pgsIndexData || !pgsImg || !art) return;
-      var idx = pgsEventAt(art.currentTime || 0);
-      if (idx >= 0) layoutPgsImg(pgsIndexData.events[idx]); // 每次都对一遍，缩放/全屏也跟着变
-      if (idx === pgsActiveIdx) return;
-      pgsActiveIdx = idx;
-      if (idx < 0) { pgsImg.style.display = 'none'; return; }
-      pgsImg.style.display = '';
-      var cached = pgsCache[idx];
-      if (cached) { pgsImg.src = cached; return; }
-      // 未命中：先把上一张位图从画面上摘掉再等回包。否则解码的几十到几百毫秒里旧图还挂着
-      // （而 layoutPgsImg 已经按新事件摆好坐标），seek 落点会显示成上一条字幕的内容。
-      // 回包只认「token 未变 + pgsActiveIdx 仍是这一条」：期间 idx 变过就只入缓存不覆盖画面，
-      // 迟到回包不会盖掉当前图。
-      pgsImg.removeAttribute('src');
-      pgsImg.style.display = 'none';
-      var token = pgsToken;
-      invoke('pgs_image', { index: idx }).then(function (b64) {
-        if (token !== pgsToken) return;
-        var url = 'data:image/png;base64,' + b64;
-        pgsCache[idx] = url;
-        pgsTrimCache(idx);
-        if (pgsActiveIdx === idx && pgsImg) { pgsImg.src = url; pgsImg.style.display = ''; }
-      }).catch(function () { });
-    }
-
-    // 位图字幕的时钟来源。注意：createPlayer 在外层作用域，看不到本块里的函数
-    // （块级函数声明不外泄），所以监听必须在这里绑，不能塞进 createPlayer。
-    function attachPgsEvents() {
-      var v = art && art.video;
-      if (!v || v.__pgsBound) return;
-      v.__pgsBound = true;
-      v.addEventListener('timeupdate', pgsPump);
-      v.addEventListener('seeking', pgsPump);
-      v.addEventListener('loadedmetadata', pgsPump);
-      v.addEventListener('play', pgsPump);
-      // 暂停时旋转屏幕、切「适应/裁剪」都不会触发 timeupdate，位图会停在旧坐标上；
-      // 观察容器与 video 的尺寸变化补一次重排（pgsPump 每次都会重算 layout）。
-      if (window.ResizeObserver) {
-        var host = pgsEl && pgsEl.parentElement;
-        if (host && !host.__pgsObserved) {
-          host.__pgsObserved = true;
-          var observer = new ResizeObserver(function () { pgsPump(); });
-          observer.observe(host);
-          observer.observe(v);
-        }
-      }
-    }
-
-    function mountPgsSubtitle(s, silent) {
-      if (!currentVideoPath || !art) return;
-      if (pgsIndexData && pgsTrackNo === s.track && pgsOwnerPath === currentVideoPath) {
-        mountedSubId = s.id;
-        if (art.subtitle) art.subtitle.style({ display: 'none' });
-        if (pgsEl) pgsEl.style.display = '';
-        ensurePgsLayer();
-        pgsActiveIdx = -1;
-        pgsPump();
-        refreshSubtitleMenu();
-        return;
-      }
-      unmountPgs();
-      var token = ++pgsToken;
-      var path = currentVideoPath;
-      updateSubPill('pgs');
-      toast('正在解析位图字幕（' + clipName(s.name) + '）…', 4000);
-      // 网络视频的位图轨：Rust 只认本地文件，先用 worker 把该轨原样复制成 cache 里的单轨
-      // mkv，再交给现有的 PGS 渲染链路（单轨 mkv 的字幕轨号就是 1）。
-      var isNetworkPgs = String(path).indexOf('/@network/') === 0;
-      var pgsSource = isNetworkPgs && window.AndroidAudioTasks && window.AndroidAudioTasks.request
-        ? window.AndroidAudioTasks.request('network_subtitle', {
-            videoPath: path,
-            trackIndex: Math.max(0, (s.ordinal || 1) - 1),
-            format: 'mkv',
-            session: window.AndroidAudioTasks.currentSession,
-          }, { timeoutMs: 900000 }).then(function (got) {
-            if (!got || !got.path) throw new Error('位图轨抽取失败');
-            return { videoPath: got.path, track: 1 };
-          })
-        : Promise.resolve({ videoPath: path, track: s.track });
-      pgsSource.then(function (target) {
-        return invoke('pgs_open', { videoPath: target.videoPath, track: target.track });
-      }).then(function (idx) {
-        if (token !== pgsToken) return;
-        clearSubPill();   // 只收字幕那颗：音轨转码可能还在跑
-        if (!idx || !idx.events || !idx.events.length) { toast('这条字幕轨里没有可显示的位图', 6000); return; }
-        pgsIndexData = idx;
-        pgsTrackNo = s.track;
-        pgsOwnerPath = path;
-        pgsCache = {};
-        pgsActiveIdx = -1;
-        mountedSubId = s.id;
-        if (art.subtitle) art.subtitle.style({ display: 'none' });
-        ensurePgsLayer();
-        attachPgsEvents();
-        pgsEl.style.display = '';
-        pgsPump();
-        refreshSubtitleMenu();
-        if (!silent) toast('位图字幕已就绪：' + clipName(s.name) + '（' + idx.events.length + ' 条）', 4000);
-      }).catch(function (e) {
-        if (token !== pgsToken) return;
-        clearSubPill();
-        toast('位图字幕解析失败：' + e, 8000);
-      });
-    }
-
-    function unmountPgs() {
-      pgsToken++;
-      if (pgsEl) pgsEl.style.display = 'none';
-      if (pgsImg) { pgsImg.removeAttribute('src'); pgsImg.style.display = 'none'; }
-      pgsCache = {};
-      pgsActiveIdx = -1;
-      pgsIndexData = null;
-      pgsTrackNo = -1;
-      pgsOwnerPath = '';
-      try { invoke('pgs_close').catch(function () { }); } catch (e) { }
-    }
+    // PGS 位图字幕现在由 libmpv/libass 直接渲染到画面，原先的索引表与贴图层已删除。
+    function unmountPgs() { }
 
     function unmountSubtitle() {
+      // mpv 模式下字幕是原生画的，关掉要靠 sid=no；Web 层那套 clear() 对它无效。
+      if (window.AndroidMpv) window.AndroidMpv.setSid(0);
       beginSidecar('subtitle', true);
       if (subtitleView) subtitleView.clear();
       mountedSubId = '';
@@ -2846,16 +2289,11 @@
       if (!candidate && appSettings.autoSubtitle === true) {
         candidate = window.AndroidSidecars.pickSubtitle(
           subItems.filter(function (item) { return item.kind === 'embedded'; }), currentVideoName, subtitlePreferences.language);
-        if (!candidate) {
-          candidate = window.AndroidSidecars.pickSubtitle(
-            subItems.filter(function (item) { return item.kind === 'bitmap'; }), currentVideoName, subtitlePreferences.language);
-        }
       }
       if (!candidate) return;
       // scan_subtitles / audio_probe 的回包可能跨过一次换片或退出播放，提交前那一刻再验一次归属
       if (video !== videoLoadToken || path !== currentVideoPath || subtitleManual || mountedSubId) return;
       if (candidate.kind === 'ext') { loadSubtitlePath(candidate.path, true); return; }
-      if (candidate.kind === 'bitmap') { mountPgsSubtitle(candidate, true); return; }
       // silent=true 只表示「这次不是用户手动点的」：beginSidecar 不会置 subtitleManual，
       // 用户之后手动选轨时不会被这条自动挂载反压。字幕胶囊（updateSubPill('extract')）
       // 和抽取失败的 toast 在 mountSubtitle 里都是无条件记账，自动抽取期间同样可见。
@@ -3042,10 +2480,18 @@
       // 上一次被强杀/崩溃会留下 *.tmp.* 半成品，打开这部片时顺手清掉
       try { invoke('clean_sidecar_tmp', { videoPath: path }).catch(function () { }); } catch (e) { }
       unmountPgs(); // 上一部的位图字幕数据（Rust 侧约 30 MB）随换片释放
+      // 原生解码要在 art 起播之前把片源交给 mpv：本地片给绝对路径，网络片给本机 Range 代理的
+      // http URL（asset:// 是 WebView 的私有协议，mpv 读不到）。
+      if (window.AndroidNativePlayer) {
+        var mpvSrc = (window.AndroidFiles && window.AndroidFiles.isNetwork(path)) ? mediaUrl(path) : path;
+        window.AndroidNativePlayer.open(mpvSrc, -1);
+      }
       setVideoFromUrl(mediaUrl(path), name, st.size, function () {
+        // libmpv 自己出声音；WebAudio 隔离链挂在假 video 上既没有意义，还会把输出静音。
+        if (window.AndroidNativePlayer) return;
         if (!isolateVideoAudio()) throw new Error('无法隔离原视频音频，已停止播放以避免误播其它音轨');
       });
-      handleAudioCodecs(path, name);
+      handleAudioCodecs(path, name); // 音轨探测：mpv 模式下直接读 track-list，不跑 ffprobe
 
       var autoDanOwner = { video: token, path: currentVideoPath, selection: danmakuSelectionGeneration };
       loadVideoSidecars(path, manualDanPath, epIndex, token, playlistTicket, autoDanOwner).catch(function (error) {
@@ -3116,20 +2562,6 @@
       get currentStat() { return currentVideoStat ? Object.assign({}, currentVideoStat) : null; },
       // 拖入字幕的入口（拖放回调与外部调试共用）
       addSubtitle: addDroppedSubtitle,
-      // 位图字幕调试入口：DevTools 里 `__BplayerDesktop.pgs` 可直接看索引/命中/缓存状态
-      get pgs() {
-        return {
-          hasIndex: !!pgsIndexData,
-          events: pgsIndexData ? pgsIndexData.events.length : 0,
-          canvas: pgsIndexData ? [pgsIndexData.canvas_w, pgsIndexData.canvas_h] : null,
-          active: pgsActiveIdx,
-          cache: Object.keys(pgsCache).length,
-          t: art ? +Number(art.currentTime).toFixed(2) : null,
-          hit: pgsIndexData ? pgsEventAt(art ? art.currentTime : 0) : null,
-          layer: pgsEl ? pgsEl.style.display : null,
-          img: pgsImg ? { len: (pgsImg.src || '').length, w: pgsImg.style.width, h: pgsImg.style.height, disp: pgsImg.style.display } : null
-        };
-      }
     };
 
     $('btnOpenVideo').addEventListener('click', async function () {
@@ -3615,14 +3047,7 @@
         return;
       }
       transcodeVideo = '';
-      if (isSub) {
-        var s = pendingSub;
-        pendingSub = null;
-        if (s && p.text && normPath(currentVideoPath) === normPath(p.video)) {
-          // 字幕走内存：ffmpeg 管道抽出的文本随事件带回，直接挂载
-          mountSubtitleText(p.text, s, false);
-        }
-      } else if (transcodeOrdinal > 0) {
+      if (transcodeOrdinal > 0) {
         var ordinal = transcodeOrdinal;
         transcodeOrdinal = -1;
         diag('legacy-audio-event-ignored', { ordinal: ordinal });

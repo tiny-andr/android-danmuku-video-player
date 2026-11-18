@@ -141,49 +141,23 @@
     async function select(audioIndex, manual) {
       if (!state || !state.tracks[audioIndex]) return;
       cancelSelection();
-      var owner = { session: state.session, generation: state.generation, video: state.video, audioIndex: audioIndex };
-      state.phase = "preparing"; state.selectedIndex = audioIndex; state.activeIndex = -1;
-      try {
-        emit("isolate"); emit("selecting", audioIndex);
-        // 探测结果里已经有时长和 PTS 起点，带上它们，prepare 就不用再跑一次 ffprobe
-        var prepared = await tasks.request("audio_prepare", {
-          videoPath: owner.video, audioIndex: audioIndex, session: owner.session,
-          durationUs: state.probe && state.probe.duration_us ? state.probe.duration_us : 0,
-          offsetSecs: probeOffset(state.probe, audioIndex)
-        });
-        if (!owns(owner)) return;
-        if (!prepared || typeof prepared.jobId !== "string" || typeof prepared.target !== "string") throw new Error("音轨缓存准备结果无效");
-        state.jobId = prepared.jobId;
-        if (prepared.cached) { await mount(owner, prepared.target, prepared.offset, prepared.legacy); return; }
-        if (!manual && !hooks.autoEnabled()) {
-          state.phase = "disabled"; cancelNative(owner.session, prepared.jobId); state.jobId = null;
-          emit("disabled", { audioIndex: audioIndex }); return;
+      // libmpv 模式：切轨就是改 mpv 的 aid，没有转码、没有缓存、没有流。
+      if (window.AndroidMpv) {
+        var pick = state.tracks[audioIndex];
+        try {
+          emit("selecting", audioIndex);
+          window.AndroidMpv.setAid(pick.id || pick.index);
+          state.phase = "ready";
+          state.selectedIndex = audioIndex;
+          state.activeIndex = audioIndex;
+          emit("ready", { audioIndex: audioIndex, legacy: false });
+        } catch (error) {
+          state.phase = "error";
+          emit("error", error.message || String(error));
         }
-        state.phase = "starting"; emit("progress", { percent: -1, written: 0 });
-        // 流式接管：边转边播（MSE），不用等整条音轨转完。失败就原样退回下面的整段转码，
-        // 那条链路和缓存复用都保持不变，流式只是「先出声」的加速路径。
-        // 进来先停掉上一路：换轨时旧流的 ffmpeg 和增长文件都必须立刻收掉。
-        if (hooks.stream) {
-          var streamed = false;
-          try { streamed = await hooks.stream({ videoPath: owner.video, audioIndex: audioIndex, session: owner.session }); }
-          catch (error) { streamed = false; }
-          if (!owns(owner)) return;
-          if (streamed) {
-            var permit = state.jobId; state.jobId = null;
-            if (permit) cancelNative(owner.session, permit);   // prepare 留下的 permit 不再需要
-            state.phase = "ready"; state.activeIndex = audioIndex;
-            emit("ready", { audioIndex: audioIndex, legacy: false });
-            return;
-          }
-        }
-        await tasks.request("audio_start", { jobId: prepared.jobId, session: owner.session });
-        if (!owns(owner)) return;
-        if (state.phase === "starting") state.phase = "running";
-      } catch (error) {
-        if (!owns(owner) || error.name === "AbortError" || ["mounting", "ready", "completed"].includes(state.phase)) return;
-        state.phase = "error"; var jobId = state.jobId; state.jobId = null; if (jobId) cancelNative(owner.session, jobId);
-        emit("resetTrack"); emit("error", error.message || String(error));
+        return;
       }
+      // 旧 WebView 播放那条路（prepare → 转码 → 挂 <audio>）已无调用者，随 0.2.0 整体下线。
     }
     function begin(video) {
       reset(); if (disposed) return null;
@@ -198,6 +172,44 @@
       var owner = { session: state.session, generation: state.generation, video: state.video };
       emit("probing");
       try {
+        // libmpv 自己解所有音轨：没有 ffprobe、没有转码。轨道表直接来自 mpv 的 track-list，
+        // 而且 mpv 已经按 default 标记选好了音轨，返回前不需要再走一遍 select()。
+        if (window.AndroidMpv) {
+          // track-list 在 mpv 读完文件头之前是空的，这里等一下（最长 10 秒）。
+          if (!(window.AndroidMpv.duration() > 0)) {
+            await new Promise(function (resolve) {
+              var tries = 0;
+              var timer = setInterval(function () {
+                if (window.AndroidMpv.duration() > 0 || ++tries > 100) { clearInterval(timer); resolve(); }
+              }, 100);
+            });
+          }
+          if (!owns(owner)) return;
+          var raw = [];
+          try { raw = JSON.parse(window.AndroidMpv.tracks() || "[]"); } catch (e) { raw = []; }
+          var mapped = raw.map(function (track) {
+            return {
+              kind: track.type === "sub" ? "subtitle" : track.type,
+              index: track.id,
+              id: track.id,
+              codec: track.codec || track["codec-desc"] || "",
+              lang: track.lang || "",
+              title: track.title || "",
+              channels: track["demux-channel-count"] || 0,
+              default: !!track.default,
+              selected: !!track.selected,
+              external: !!track.external
+            };
+          });
+          state.probe = {
+            tracks: mapped,
+            duration_us: Math.round((window.AndroidMpv.duration() || 0) * 1000000)
+          };
+          state.tracks = mapped.filter(function (track) { return track.kind === "audio"; });
+          state.phase = "idle";
+          emit("probe", { tracks: state.tracks.slice(), allTracks: mapped, duration_us: state.probe.duration_us });
+          return;
+        }
         // 同一条片反复打开时没必要每次都跑 ffprobe：网络源上那一步要好几秒。
         // 缓存由外壳按「路径 + 大小 + 修改时间」校验，文件一变就自然失效。
         var probe = null;
