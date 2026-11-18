@@ -16,20 +16,19 @@
     <!-- AndroidTV support -->
     <uses-feature android:name="android.software.leanback" android:required="false" />
 
-    <!-- 关于 android:appCategory —— 这里**故意不设**。
-         `appCategory="game"` 确实能让本应用命中 Android 16+ 大屏方向限制的豁免名单
-         （sw>=600dp 的设备会忽略 setRequestedOrientation），但代价是系统把整个应用
-         当成游戏：荣耀/华为会拉满游戏模式、通知栏挂游戏图标、侧边栏推游戏助手。
-         用户明确不接受这个副作用（2026-11-18）。
-         取舍：手机 sw≈353dp 本来就不受限，播放页的方向按钮照常工作；平板 sw≈800dp
-         会丢失「手动强制横竖屏」按钮，但 `USER_LANDSCAPE`/`USER_PORTRAIT`（跟随系统
-         旋转）仍然有效。要恢复大屏上的手动方向控制，只能重新加上 appCategory="game"
-         并接受游戏模式。 -->
+    <!-- 关于 android:appCategory —— 声明 video，**不是** game。
+         game 能让应用命中 Android 16+ 大屏方向限制的豁免名单（sw>=600dp 的设备会忽略
+         setRequestedOrientation），代价是系统把整个应用当游戏：拉满游戏模式、通知栏挂
+         游戏图标、侧边栏推游戏助手，用户明确不接受。
+         声明 video 是这里的真实类别，同时给系统分类器一个具体信号：ColorOS/OxygenOS
+         会把 debuggable 的媒体应用猜成游戏（安装即写 oplus_games_low_latency_state=
+         <pkg>:1），显式声明 video 正是与那个猜测相反的事实。 -->
     <application
         android:icon="@mipmap/ic_launcher"
         android:label="${appName}"
         android:theme="@style/Theme.bplayer_android"
         android:networkSecurityConfig="@xml/network_security_config"
+        android:appCategory="video"
         android:usesCleartextTraffic="${usesCleartextTraffic}">
         <activity
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode"

@@ -65,11 +65,19 @@
     position: fixed; top: 0; right: 0; bottom: 0; width: 330px; max-width: 92vw;
     background: rgba(20, 22, 28, .97); backdrop-filter: blur(10px);
     border-left: 1px solid var(--line); z-index: 60;
-    transform: translateX(105%); transition: transform .25s ease;
+    transform: translateX(105%); transition: transform .25s ease, visibility 0s linear .25s;
     display: flex; flex-direction: column;
     box-shadow: -18px 0 50px -20px rgba(0, 0, 0, .6);
+    /* 可见性不能只靠 transform：部分 WebView 上父级 animation 或规则解析差异会让
+     * translateX 失效，抽屉于是停在视口里；关着的时候它还会吃掉右上角的点击，
+     * 点 × 落到下层的设置按钮上。visibility + pointer-events 不参与变换计算，
+     * 任何引擎都按字面执行，这里是兜底的那一层。 */
+    visibility: hidden; pointer-events: none;
   }
-  .playlist.open { transform: translateX(0); }
+  .playlist.open {
+    transform: translateX(0); visibility: visible; pointer-events: auto;
+    transition: transform .25s ease, visibility 0s linear 0s;
+  }
   .pl-head {
     display: flex; align-items: center; gap: 10px;
     padding: 14px 16px; border-bottom: 1px solid var(--line); font-size: 13px;

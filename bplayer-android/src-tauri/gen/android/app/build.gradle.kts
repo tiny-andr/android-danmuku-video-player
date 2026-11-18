@@ -159,6 +159,6 @@ apply(from = file("tauri.build.gradle.kts"))
 // through the variant API instead; debug and release then install side by side.
 androidComponents {
     onVariants(selector().withBuildType("debug")) { variant ->
-        variant.applicationId.set(variant.applicationId.get() + ".debug")
+        variant.applicationId.set(variant.applicationId.get() + ".dbg")
     }
 }

@@ -38,3 +38,5 @@ bplayer-android/src-tauri/gen/schemas/
 # Android release signing - never commit
 .keys/
 bplayer-android/src-tauri/gen/android/keystore.properties
+
+bplayer-android/dist/

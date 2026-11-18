@@ -297,6 +297,16 @@ adb install -r src-tauri/gen/android/app/build/outputs/apk/universal/release/app
 
 产物：`bplayer-android/src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk`（构建产物与 `node_modules`、`target`、Gradle `build/` 均已 gitignore）。
 
+**发布用固定目录 `bplayer-android/dist/`**：Gradle 的产物路径深、文件名固定不带版本、每次覆盖，发出去的包在本机不留痕迹。`npm run android:dist` = 两个构建 + `scripts/stage-apk.mjs`，后者从 `package.json` 读版本号把两个包复制成：
+
+```
+bplayer-android/dist/
+  Bplayer-Android-<ver>.apk        正式包
+  Bplayer-Android-debug-<ver>.apk  debug 包
+```
+
+发版一律从这里上传，不要再往 `H:\tmp` 之类的地方临时改名。命名顺序也是规则：GitHub 资产按文件名排序，`Bplayer-Android-0.2.0.apk` 与 `Bplayer-Android-debug-0.2.0.apk` 在 `Android-` 之后是 `0`(0x30) vs `d`(0x64)，所以正式包天然排在前面——版本号必须在 `debug` 之前，写反了用户一眼就点错。`dist/` 已 gitignore（二进制不进库），但留在项目内可追溯。
+
 ## 6. 已验证 / 已知限制
 
 已验证：异形契约（6.11 GB MP4，1920×1080）播放；23,159 条 B 站弹幕 271–293 ms 解析；竖屏首页与横屏播放切换；沉浸式；文件夹 10 集连播；同源换集；返回键层级；最近播放去重；信息卡与设置页手机布局。
@@ -313,6 +323,9 @@ Audio conversion now works through the Android native bridge: local DTS/TrueHD/A
 - **`sub-pos` 的百分比基准是「视频画面」，不是窗口**：竖屏 letterbox 时按窗口高度折算（例如算出 62）会把字幕摆到画面中间；`100` 本身就是画面底边。老版 `AndroidSubtitleView.placement()` 那套「先算 contain 后的画面矩形、再定位」的换算在 mpv 这边不适用，直接用默认 100。
 - **软横屏只能让 mpv 转画面，不要让 View 转**：`TextureView.rotation + scaleX/scaleY` 会把画面缩成竖长条，`Matrix.postRotate + postScale` 会缩成方块——两者都是「先把画面 contain 进竖窗口的位图，再旋转那张图」，比例已经丢了。`video-rotate=90` 是 mpv 先转画面再按新宽高 contain，宽度自然铺满。
 - **`setRequestedOrientation` 在 `sw>=600dp` 上被系统硬丢**：Android 16 官方文档写的是「以 API 36 为目标平台的应用」，但实测 ColorOS 对 `targetSdk=35` 的应用照样忽略（`h1318dp` + `ROTATION_0` 纹丝不动），把 Manifest 的 `screenOrientation` 删成 `unspecified` 也没用。别在这条路上继续试，直接走软横屏。
+- **debug 包不能用 `.debug` 作 applicationId 后缀**（2026-11-19 实测，ColorOS/OxygenOS）：`applicationId` 以 `.debug` 结尾的构建，装完立刻被游戏空间当成游戏——左上角出现半透明游戏助手把手，并在 global settings 写入 `oplus_games_low_latency_state=<pkg>:1`。同一次构建里 `debuggable=true`、label 含 "debug"、缺 `appCategory` 都**不是**原因（逐个隔离验证过），换后缀为 `.dbg` 即消失。判据：`adb shell settings list global | grep -i oplus_games_low_latency` 能看到被标记的包；卸载后这条记录不清除（残留但不触发）。Manifest 里声明 `android:appCategory="video"` 是对分类器的正面信号，保留。
+- **`adb install` 返回 Success 不等于装完**：OEM 安装器会拦在「继续安装」确认页，命令已经返回成功但设备还停在那里。确认方法是看 `dumpsys window | grep mCurrentFocus` 是否已到 `InstallFinishActivity`，或直接 `adb shell input tap` 点掉；不要拿 `Success` 当验收依据。
+- **查 APK 内的 AndroidManifest.xml 必须用 aapt2**：它是二进制 AXML，按 UTF-8 解码再字符串匹配会给出稳定的**假阴性**（源码明明写了、查出来是「不存在」）。用 `aapt2 dump xmltree --file AndroidManifest.xml <apk>`，或退一步用 `dumpsys package <pkg>` 看运行时视角。同类二进制资源（resources.arsc、dex）都要用对应工具解析。
 - 这台设备（荣耀 VER-AN10）的 **logcat 全程被厂商加密**，`adb logcat` 读不到任何应用日志。排查只能靠：把状态暴露成 `@JavascriptInterface` 方法用 CDP 读，或 `Thread.setDefaultUncaughtExceptionHandler` 把堆栈写到 `getExternalFilesDir()/crash.txt` 再 `adb shell cat`。
 - `.stage` 等元素带 `animation-fill-mode: both` 的 identity `transform` 会形成 containing block，fixed 后代无法全屏；全屏规则必须落在 `.stage` 上并清 `transform/animation`。
 - 原 CSS `#aFileMask{display:flex}` 会压过 `[hidden]`，需要 `#aFileMask[hidden]{display:none!important}`。
