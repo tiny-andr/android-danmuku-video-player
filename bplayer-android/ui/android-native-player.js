@@ -105,6 +105,9 @@
       shim.sync();
       // 让 art 重新按真实画面尺寸算矩形（方向、适应/裁剪都吃这个）
       shim.notifyResize();
+      // track-list 到这一刻才完整（sub-auto=fuzzy 拉进来的外挂轨也在此刻出现），
+      // 前端要靠这次回调重建字幕菜单并重跑自动挂载。
+      if (root.__bplayerMpvFileLoaded) { try { root.__bplayerMpvFileLoaded(); } catch (error) { } }
     };
     root.__mpvEndFile = function (reason) {
       // mpv END_FILE: EOF=0, STOP=2, QUIT=3, ERROR=4

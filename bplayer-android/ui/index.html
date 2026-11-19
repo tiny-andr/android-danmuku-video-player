@@ -550,6 +550,10 @@
         <div class="settings-desc">自动转码核心不支持的内置字幕到内存中并挂载播放。</div>
       </div>
 
+      <div class="settings-row" id="settingsEngineNote" hidden>
+        <div class="settings-desc">当前使用 libmpv 播放内核：每条音轨直接解码、每条字幕（含 ASS/PGS）直接渲染，不需要转码或抽取。上面两个「自动转换」开关在这个内核下没有作用，已隐藏。</div>
+      </div>
+
       <div class="settings-row" id="settingsUpdateRow" hidden>
         <div class="settings-update">
           <div class="settings-update-line" id="updateStatus">当前版本 —</div>
@@ -1630,8 +1634,99 @@
       return subtitleView;
     }
 
+    /* ---- 字幕设置 → libmpv ----
+     * 0.2.0 起内嵌轨、以及字幕菜单里选中的外挂轨都由 libass 直接画进视频帧，CSS 改不到
+     * 它们；而拖入的纯文本字幕仍然走上面的 Web 层（sub-add 只吃文件路径，加不了内存文本）。
+     * 两套渲染路径并存，所以同一份设置必须两边都下发。
+     *
+     * mpv 属性是播放器全局的、跨文件保留，这里按值去重：拖延迟滑块的每个 input 事件、
+     * art 每次 control 切换、resize 都会走到 applySubtitleStyle。
+     */
+    var MPV_SUB_COLORS = { '#ffffff': '#FFFFFF', '#ffff00': '#FFFF00', '#00ffff': '#00FFFF' };
+    var MPV_SUB_PUSHED = { delay: null, scale: null, color: '', border: null, pos: null };
+    var mpvSubVisible = null;
+    // 真机实测（荣耀 VER-AN10 竖屏，窗口 1060×2376）：sub-pos 的百分比基准是**窗口高度**，
+    // 画面底边只到 62%；libass 还会在文字框底部留一段行距，所以「字幕视觉底边百分比」
+    // ≈ 0.955 × sub-pos + 4.5% − 5.3% × 字号档位。这三个数由 sub-pos 0…100 逐档截图
+    // 拟合而来（glyph 底边像素 = 三分量直线），用于把手里的「画面底边」反解成 sub-pos。
+    var MPV_SUB_POS_SLOPE = 0.955;
+    var MPV_SUB_POS_MARGIN = 4.5;
+    var MPV_SUB_POS_SLACK = 5.3;
+
+    // 18px（应用默认「小」）锚定 mpv 默认的 sub-scale=1：不改变没动过设置的人的观感，
+    // 其余档位按比例放大。mpv 自己的默认字号比 CSS 18px 大，这是一次有意的取舍。
+    function mpvSubScale(fontSize) {
+      var scale = Number(fontSize) / 18;
+      return Math.round(Math.max(0.5, Math.min(3, isFinite(scale) ? scale : 1)) * 1000) / 1000;
+    }
+
+    // 「画面内底部 / 画面下方」换算成 sub-pos 百分比：先复用 Web 层那套
+    // placement()（同一份画面矩形 → 字幕底边距离），得出字幕底边的窗口百分比，
+    // 再按上面的拟合关系反解成 mpv 需要的 sub-pos。
+    function mpvSubPos() {
+      var stage = art && art.template && art.template.$player;
+      var media = art && art.video;
+      if (!stage || !media || !stage.getBoundingClientRect || !media.getBoundingClientRect) return 100;
+      // 软横屏时 mpv 把画面转了 90°，前端拿到的 videoWidth/Height 是未旋转的，
+      // 按它算出的画面矩形是错的；这种情况退回 mpv 默认底部，不去猜。
+      if (document.body && document.body.classList.contains('soft-rotate')) return 100;
+      var bounds = stage.getBoundingClientRect(), box = media.getBoundingClientRect();
+      if (!(bounds.height > 0)) return 100;
+      var result = window.AndroidSubtitleView.placement({
+        width: bounds.width, height: bounds.height,
+        video: { x: box.left - bounds.left, y: box.top - bounds.top, width: box.width, height: box.height },
+        videoWidth: media.videoWidth, videoHeight: media.videoHeight,
+        fit: (window.getComputedStyle(media).objectFit || 'contain'),
+        position: subtitlePreferences.position,
+        controls: 0,
+        // 只影响「画面下方」那一档的落点：mpv 画出来的字比 CSS 字号高，取 1.8 倍估一行
+        textHeight: Math.round(subtitlePreferences.fontSize * 1.8)
+      });
+      var percent = (bounds.height - result.bottom) / bounds.height * 100;
+      var percent2 = (percent - MPV_SUB_POS_MARGIN + MPV_SUB_POS_SLACK * mpvSubScale(subtitlePreferences.fontSize)) / MPV_SUB_POS_SLOPE;
+      return Math.round(Math.max(0, Math.min(100, isFinite(percent2) ? percent2 : 100)) * 100) / 100;
+    }
+
+    // 老内核的桥没有这几个方法（0.2.0 以前一套都没有），逐个探测再调：
+    // 不能让 undefined is not a function 把整条样式链打断。
+    function pushMpvSubValue(key, method, value) {
+      if (MPV_SUB_PUSHED[key] === value) return;
+      var bridge = window.AndroidMpv;
+      if (!bridge || typeof bridge[method] !== 'function') return;
+      MPV_SUB_PUSHED[key] = value;
+      bridge[method](value);
+    }
+
+    function pushMpvSubtitleStyle() {
+      if (!window.AndroidMpv) return;   // 桌面版 / 老内核没有这个桥
+      pushMpvSubValue('delay', 'setSubDelay', Math.max(-10, Math.min(10, Number(subtitleDelay) || 0)));
+      pushMpvSubValue('scale', 'setSubScale', mpvSubScale(subtitlePreferences.fontSize));
+      pushMpvSubValue('color', 'setSubColor', MPV_SUB_COLORS[subtitlePreferences.color] || MPV_SUB_COLORS['#ffffff']);
+      // CSS 描边是 0/2/4px 的八向阴影，libass 的 sub-border-size 以字号为基准，
+      // 乘 1.5 后「标准」≈ mpv 默认粗细，「加粗」再翻一倍。
+      pushMpvSubValue('border', 'setSubBorder', Math.max(0, Math.min(4, Number(subtitlePreferences.outline) || 0)) * 1.5);
+      pushMpvSubValue('pos', 'setSubPos', mpvSubPos());
+    }
+
+    // mpv 侧字幕的显示开关。Web 层字幕挂载时必须让 mpv 让位，否则同一句话会被
+    // libass 和 CSS 各画一遍。
+    function setMpvSubVisible(on) {
+      on = !!on;
+      if (!window.AndroidMpv || mpvSubVisible === on) return;
+      if (typeof window.AndroidMpv.setSubVisible !== 'function') return;
+      mpvSubVisible = on;
+      window.AndroidMpv.setSubVisible(on);
+    }
+
     function applySubtitleStyle() {
       if (!art) return;
+      // 竖屏↔横屏、折叠、适应/裁剪都会换画面矩形，字幕位置要跟着重算。art 是首次播片时
+      // 才创建的，而 createPlayer() 在 initDesktop() 作用域之外拿不到本函数，所以在这里
+      // 懒挂一次（内部按值去重，频繁 resize 不会反复打 JNI）。
+      if (!art.__bplayerSubStyleBound) {
+        art.__bplayerSubStyleBound = true;
+        if (art.on) art.on('resize', applySubtitleStyle);
+      }
       var outline = subtitlePreferences.outline;
       var shadow = outline ? [-1, 0, 1].flatMap(function (horizontal) {
         return [-1, 0, 1].filter(function (vertical) { return horizontal || vertical; }).map(function (vertical) {
@@ -1642,6 +1737,7 @@
         textShadow: shadow, whiteSpace: 'pre-line', overflowWrap: 'anywhere', lineHeight: '1.4',
         maxHeight: '48vh', overflow: 'hidden', padding: '0 12px', boxSizing: 'border-box' });
       if (subtitleView) { subtitleView.setOffset(subtitleDelay); subtitleView.setPosition(subtitlePreferences.position); }
+      pushMpvSubtitleStyle();
     }
 
     function bindSubtitleOptions() {
@@ -1684,6 +1780,8 @@
         if (!ownsSidecar(owner, 'subtitle')) return false;
         var item = addDroppedSubtitle(path);
         mountedSubId = item.id;
+        // Web 层字幕接管画面：mpv 侧的字幕先别画，否则同一句话两套渲染各画一遍。
+        setMpvSubVisible(false);
         applySubtitleStyle(); refreshSubtitleMenu();
         $('subtitleStatus').textContent = '已载入：' + item.name + (type === 'ass' || type === 'ssa' ? '（文字兼容，不含原特效）' : '');
         return true;
@@ -1735,6 +1833,14 @@
       subtitleManual = false; danmakuManual = false; subtitleDelay = 0; mountedSubId = ''; activeDanmakuName = '';
       if (subtitleView) { subtitleView.clear(); subtitleView.setOffset(0); }
       $('subtitleDelay').value = '0'; $('subtitleStatus').textContent = ''; $('danmakuStatus').textContent = '支持 B 站 XML 与数组格式 JSON，可选择不同目录、不同文件名的弹幕。';
+      // 延时是「仅当前影片」的：mpv 属性跨文件保留，不清掉的话换片会继承上一部的偏移。
+      // 位置随画面矩形变化，由下一次 applySubtitleStyle 按新窗口重算。
+      MPV_SUB_PUSHED.delay = null;
+      // mpv 的 sid 也是黏性的：上一部手动选过的轨道号（或「关闭字幕」写入的 no）会被
+      // 下一部原样套用。换片必须恢复 auto，否则语言偏好 / 自动挂载都会被上一部顶掉。
+      if (window.AndroidMpv && typeof window.AndroidMpv.setSidAuto === 'function') window.AndroidMpv.setSidAuto();
+      setMpvSubVisible(true);
+      if (art) applySubtitleStyle();
     }
 
     function codecName(c) {
@@ -1899,6 +2005,16 @@
       buildSubtitleMenu(path, null, audioSubtitleToken);
       ensureAudioSession().probe();
     }
+
+    // mpv 读完文件头之后 track-list 才是完整的（sub-auto=fuzzy 拉进来的外挂轨也在此刻
+    // 才出现），而开片瞬间那次 buildMpvSubtitleMenu 读到的往往是空表。原生侧在
+    // FILE_LOADED 时经 android-native-player.js 的回调转进这里，重建菜单并重跑自动挂载。
+    window.__bplayerMpvFileLoaded = function () {
+      if (!window.AndroidMpv || !currentVideoPath || !window.AndroidPlayback.active) return;
+      buildSubtitleMenu(currentVideoPath, null, ++probeToken);
+      // 画面尺寸可能到这一刻才可用，字幕位置要按新的画面矩形重算一次
+      applySubtitleStyle();
+    };
 
     function cancelAudioWork() {
       if (!audioSession) return;
@@ -2092,36 +2208,78 @@
 
     // libmpv 模式：轨道表来自 mpv 自己，字幕由 libass/PGS 直接渲染到画面上，
     // 不再走「Rust 解容器 → 抽 cue/位图 → 前端贴层」那条链。
+    // 这里的 kind 与老 Web 层不同：内嵌轨是 'mpv'、外挂文件是 'mpvFile'，而
+    // AndroidSidecars.pickSubtitle 只认 embedded/ext —— 排序前要再归一一次，
+    // 见 subtitlePickerPool()。别直接拿 kind === 'ext' 过滤，那样永远挑不到候选。
     function buildMpvSubtitleMenu(path, token) {
       invoke('scan_subtitles', { videoPath: path }).then(function (exts) {
         if (token !== probeToken) return;
         var raw = [];
         try { raw = JSON.parse(window.AndroidMpv.tracks() || '[]'); } catch (error) { raw = []; }
         subItems = [];
+        // 外挂轨的 sid 索引：mpv 的 sub-auto=fuzzy 已经把同名外挂字幕拉进 track-list，
+        // 菜单里同一条文件不能再走 sub-add，否则会出现两条指向同一文件的轨道。
+        var loadedExternal = [];
+        raw.forEach(function (t) {
+          if (t.type === 'sub' && t['external-filename']) loadedExternal.push({ path: normPath(t['external-filename']), sid: t.id });
+        });
+        function externalSid(filePath) {
+          var key = normPath(filePath);
+          var hit = loadedExternal.filter(function (entry) { return entry.path === key; })[0];
+          return hit ? hit.sid : 0;
+        }
         var ordinal = 0;
         raw.forEach(function (t) {
           if (t.type !== 'sub') return;
           ordinal++;
           var codec = String(t.codec || '').toUpperCase();
+          var file = String(t['external-filename'] || '');
+          var external = !!file && externalSid(file) > 0;
           subItems.push({
             id: 'mpv:' + t.id,
             kind: 'mpv',
             sid: t.id,
-            name: t.title || t.lang || ('内嵌字幕' + ordinal),
-            codecLabel: codec === 'HDMV_PGS_SUBTITLE' ? 'PGS 位图' : (codec || '文本'),
+            // 外挂轨用文件名（用户认得出来），内嵌轨才用容器里的标题 / 语言
+            name: external ? pathName(file) : (t.title || t.lang || ('内嵌字幕' + ordinal)),
+            lang: t.lang || '',
+            external: external,
+            path: file,
+            codecLabel: external ? '外挂' : (codec === 'HDMV_PGS_SUBTITLE' ? 'PGS 位图' : (codec || '文本')),
             default: !!t.default,
           });
         });
         (exts || []).forEach(function (f) {
+          if (externalSid(f.path)) return;   // 已经是 track-list 里的 mpv 轨，菜单里不列第二遍
           subItems.push({ id: 'mpvfile:' + f.path, kind: 'mpvFile', path: f.path, name: f.name, codecLabel: '外挂' });
+        });
+        // 拖进来的字幕文件不在视频同目录，scan_subtitles 扫不到；重建菜单时补回来，
+        // 否则一次 FILE_LOADED 重建就会把用户刚拖进来的条目从菜单里抹掉（Web 层仍在渲染）。
+        droppedSubs.forEach(function (f) {
+          var exists = subItems.some(function (s) { return normPath(s.path) === normPath(f); });
+          if (exists) return;
+          var suffix = String(f).split('.').pop().toLowerCase();
+          subItems.push({
+            id: 'ext:' + f, kind: 'ext', name: pathName(f), path: f, dropped: true,
+            type: suffix === 'ass' || suffix === 'ssa' ? 'ass' : (suffix === 'vtt' ? 'vtt' : 'srt'),
+          });
         });
         // mpv 可能已经按 default 自动挂了某条，把高亮对上去
         if (!mountedSubId) {
           for (var i = 0; i < raw.length; i++) {
             if (raw[i].type === 'sub' && raw[i].selected) { mountedSubId = 'mpv:' + raw[i].id; break; }
           }
+        } else if (mountedSubId.indexOf('mpvfile:') === 0) {
+          // 上一轮在菜单里 sub-add 的外挂文件这一轮已经进了 track-list：
+          // 把选中项迁到新 sid，否则高亮会丢、关字幕也关不到它。
+          var pendingSid = externalSid(mountedSubId.slice('mpvfile:'.length));
+          if (pendingSid) mountedSubId = 'mpv:' + pendingSid;
         }
         refreshSubtitleMenu();
+        // 菜单条目是自动挂载的唯一候选来源，重建完立刻跑一次；这里同时覆盖
+        // FILE_LOADED 之后「fuzzy 外挂轨才出现」的那一轮。
+        // raw 为空说明文件还没加载完（track-list 读不到东西），这时候 sub-add 会在
+        // mpv 里和后面 sub-auto 拉进来的同一条外挂撞车，等 FILE_LOADED 那一轮再说。
+        if (raw.length) autoMountSubtitle();
       }).catch(function () { refreshSubtitleMenu(); });
     }
 
@@ -2224,17 +2382,20 @@
     function mountSubtitle(s, silent) {
       if (s.disabled || !currentVideoPath) return;
       closePanel('subtitlePanel');
-      if (s.kind === 'mpv') {
-        window.AndroidMpv.setSid(s.sid);
+      if (s.kind === 'mpv' || s.kind === 'mpvFile') {
+        // 作废在途的 Web 层字幕读取（silent=false 时顺带锁住后续自动挂载），
+        // 并让 mpv 侧重新参与渲染：两套路径同时画同一句话会重影。
+        beginSidecar('subtitle', !silent);
+        if (subtitleView) subtitleView.clear();
+        setMpvSubVisible(true);
+        if (s.kind === 'mpv') {
+          window.AndroidMpv.setSid(s.sid);
+          $('subtitleStatus').textContent = '字幕：' + s.name;
+        } else {
+          window.AndroidMpv.addSub(s.path, true);
+          $('subtitleStatus').textContent = '外挂字幕：' + s.name;
+        }
         mountedSubId = s.id;
-        $('subtitleStatus').textContent = '字幕：' + s.name;
-        refreshSubtitleMenu();
-        return;
-      }
-      if (s.kind === 'mpvFile') {
-        window.AndroidMpv.addSub(s.path, true);
-        mountedSubId = s.id;
-        $('subtitleStatus').textContent = '外挂字幕：' + s.name;
         refreshSubtitleMenu();
         return;
       }
@@ -2273,6 +2434,7 @@
     function unmountSubtitle() {
       // mpv 模式下字幕是原生画的，关掉要靠 sid=no；Web 层那套 clear() 对它无效。
       if (window.AndroidMpv) window.AndroidMpv.setSid(0);
+      setMpvSubVisible(true);   // 下次选轨要能立刻看见
       beginSidecar('subtitle', true);
       if (subtitleView) subtitleView.clear();
       mountedSubId = '';
@@ -2283,29 +2445,61 @@
       refreshSubtitleMenu();
     }
 
-    // 自动挂载：外挂（同名 > 变体/语言 > 同目录其它）优先；只有在没有可自动挂载的外挂、
-    // 且设置里开了「自动转换不支持的字幕」时，才自动挂内嵌轨（default > 偏好语言 > 首条）。
-    // 内嵌里先文本轨（S_TEXT/*，走 ffmpeg 稀疏抽取），没有再退到位图轨（PGS，走 pgs_open 解码）：
-    // 两者都是「核心不支持、需要我们自己处理」的字幕，像《潘神》这种全 PGS 的片子必须能被接住。
-    // 外挂与内嵌互斥：pickSubtitle 对三条路径各自排序，先外挂后内嵌，绝不会两个都挂。
+    // mpv 模式的字幕条目 kind 是 mpv / mpvFile，老 Web 层是 embedded / ext；
+    // AndroidSidecars.pickSubtitle 只认后两者，这里先统一成它认识的形状再排序，
+    // 排序规则本身（外挂优先 > 同组内语言偏好 > default > 菜单顺序）完全沿用。
+    var SUB_LANG_ALIASES = {
+      zho: 'zh-Hans', chi: 'zh-Hans', zhi: 'zh-Hans', zh: 'zh-Hans', 'zh-cn': 'zh-Hans', 'zh-sg': 'zh-Hans', chs: 'zh-Hans',
+      zht: 'zh-Hant', 'zh-tw': 'zh-Hant', 'zh-hk': 'zh-Hant', 'zh-mo': 'zh-Hant', cht: 'zh-Hant',
+      jpn: 'ja', ja: 'ja', jp: 'ja', eng: 'en', en: 'en', kor: 'ko', ko: 'ko',
+    };
+
+    function subtitlePickerPool() {
+      return subItems.filter(function (item) { return !item.disabled; }).map(function (item) {
+        if (item.kind === 'mpv') {
+          return { item: item, kind: item.external ? 'ext' : 'embedded', name: item.name, lang: item.lang || '', default: !!item.default };
+        }
+        if (item.kind === 'mpvFile') return { item: item, kind: 'ext', name: item.name, lang: '' };
+        return { item: item, kind: item.kind, name: item.name, lang: item.lang || '', default: !!item.default };
+      });
+    }
+
+    // mpv 的轨道语言是 ISO 639-2（zho/jpn/eng…），字幕文件名里则常写成 ja/简体中文，
+    // 统一成设置页那 5 个偏好取值，语言偏好才可能命中。
+    function subtitleItemLanguage(item) {
+      var code = String(item.lang || '').toLowerCase().replace(/_/g, '-');
+      if (SUB_LANG_ALIASES[code]) return SUB_LANG_ALIASES[code];
+      return window.AndroidSidecars.language(item.name || '');
+    }
+
+    // 自动挂载：语言偏好（设置页那项）优先，其次外挂 > 内嵌，同组内按 default / 同名排序。
+    // 老 Web 层与 mpv 层共用这一份逻辑，kind 差异由 subtitlePickerPool 吸收。
+    // mpv 模式下 mpv 已经按容器 default 选好了一条，所以只有「有命中语言偏好的轨」或
+    // 「一条都没挂上」时才动手，不无缘无故覆盖播放器 / 用户的选择。
     function autoMountSubtitle() {
-      if (subtitleManual || mountedSubId) return;  // 用户手动选过 / 已有外挂自动挂载：不覆盖
-      if (pendingSub != null || transcodeVideo) return; // 内嵌抽取已经在跑：别重复提交整批轨
+      if (subtitleManual) return;                          // 用户手动选过：不覆盖
+      if (pendingSub != null || transcodeVideo) return;    // 老内核的内嵌抽取在跑：别重复提交
       var video = videoLoadToken, path = currentVideoPath;
-      var candidate = window.AndroidSidecars.pickSubtitle(
-        subItems.filter(function (item) { return item.kind === 'ext'; }), currentVideoName, subtitlePreferences.language);
-      if (!candidate && appSettings.autoSubtitle === true) {
-        candidate = window.AndroidSidecars.pickSubtitle(
-          subItems.filter(function (item) { return item.kind === 'embedded'; }), currentVideoName, subtitlePreferences.language);
+      var pool = subtitlePickerPool();
+      var preferred = subtitlePreferences.language;
+      var hits = preferred === 'auto' ? [] : pool.filter(function (entry) { return subtitleItemLanguage(entry.item) === preferred; });
+      var basis = hits.length ? hits : (mountedSubId ? [] : pool);
+      if (!basis.length) return;
+      // mpv 模式下内嵌轨由 libmpv 直接渲染，不存在「转换」开关；旧内核仍受设置页开关控制。
+      var allowEmbedded = window.AndroidMpv ? true : appSettings.autoSubtitle === true;
+      var picked = window.AndroidSidecars.pickSubtitle(
+        basis.filter(function (entry) { return entry.kind === 'ext'; }), currentVideoName, 'auto');
+      if (!picked && allowEmbedded) {
+        picked = window.AndroidSidecars.pickSubtitle(
+          basis.filter(function (entry) { return entry.kind === 'embedded'; }), currentVideoName, 'auto');
       }
-      if (!candidate) return;
+      if (!picked) return;
+      var item = picked.item;
       // scan_subtitles / audio_probe 的回包可能跨过一次换片或退出播放，提交前那一刻再验一次归属
-      if (video !== videoLoadToken || path !== currentVideoPath || subtitleManual || mountedSubId) return;
-      if (candidate.kind === 'ext') { loadSubtitlePath(candidate.path, true); return; }
-      // silent=true 只表示「这次不是用户手动点的」：beginSidecar 不会置 subtitleManual，
-      // 用户之后手动选轨时不会被这条自动挂载反压。字幕胶囊（updateSubPill('extract')）
-      // 和抽取失败的 toast 在 mountSubtitle 里都是无条件记账，自动抽取期间同样可见。
-      mountSubtitle(candidate, true);
+      if (video !== videoLoadToken || path !== currentVideoPath || subtitleManual) return;
+      if (item.sid && mountedSubId === 'mpv:' + item.sid) return;   // 已经是这一条
+      // silent=true 只表示「这次不是用户手动点的」，不会锁住后续换轨。
+      mountSubtitle(item, true);
     }
 
     // ---- 后台任务胶囊（音轨 / 字幕各一颗）----
@@ -2588,6 +2782,18 @@
   function openSettings() {
     hideToast(); // 设置页是模态，压在它上面的提示先收掉，免得挡住内容
     window.AndroidNavigation.open('settingsMask');
+    // libmpv 内核下两条「自动转换」都是死开关：音轨每条直接解码、字幕每条直接渲染，
+    // 没有转码/抽取可开。留着只会让用户以为关掉能改变什么（实测 0.2.0 里它们确实
+    // 什么都不控制），所以整行隐藏，改由一行说明交代内核行为。老 Web 内核照旧显示。
+    var nativeEngine = !!window.AndroidMpv;
+    ['optAutoAudio', 'optAutoSubtitle'].forEach(function (id) {
+      var box = $(id);
+      var row = box && box.closest && box.closest('.settings-row');
+      // 这里必须用 style：.settings-row 自带 display:flex，会压过 [hidden]
+      if (row) row.style.display = nativeEngine ? 'none' : '';
+    });
+    var engineNote = $('settingsEngineNote');
+    if (engineNote) engineNote.style.display = nativeEngine ? '' : 'none';
     $('optAutoAudio').checked = appSettings.autoAudio;
     $('optAutoSubtitle').checked = appSettings.autoSubtitle;
     $('optKeepScreenOn').checked = appSettings.keepScreenOn;

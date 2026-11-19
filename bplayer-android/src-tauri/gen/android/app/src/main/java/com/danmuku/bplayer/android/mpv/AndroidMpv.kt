@@ -127,6 +127,16 @@ class AndroidMpv(private val view: MPVView, private val webView: WebView) {
         view.lib?.setPropertyString("sid", if (id <= 0) "no" else id.toString())
     }
 
+    /**
+     * 恢复「按容器 default 自动选字幕」。`sid` 是黏性 option：上一部显式选过的轨道号
+     * （或 `no`）会被下一部文件原样套用，换片不重置的话，字幕语言偏好和自动挂载都
+     * 会被上一部的选择顶掉——连播时表现为「这一集没有字幕」。
+     */
+    @JavascriptInterface
+    fun setSidAuto() {
+        view.lib?.setPropertyString("sid", "auto")
+    }
+
     @JavascriptInterface
     fun addSub(path: String, select: Boolean): Boolean {
         val lib = view.lib ?: return false
@@ -162,9 +172,43 @@ class AndroidMpv(private val view: MPVView, private val webView: WebView) {
     }
 
     /**
-     * 字幕纵向位置，单位是**窗口高度**的百分比（mpv 的 sub-pos 语义是屏幕高度，
-     * 不是视频画面高度）。竖屏 letterbox 时写 100 会把字幕塞进下方黑边，
-     * 所以前端按 contain 后的画面矩形算好百分比再传进来。
+     * 字幕文字颜色 `#RRGGBB`。只接受 6 位十六进制：mpv 的颜色解析器对非法值会静默
+     * 落回默认色，前端因此看不出自己的 bug，所以这里先拒绝掉。
+     */
+    @JavascriptInterface
+    fun setSubColor(color: String) {
+        if (!HEX_COLOR.matches(color)) return
+        view.lib?.setPropertyString("sub-color", color.uppercase())
+    }
+
+    /** 描边宽度，单位和 `sub-font-size` 相同（mpv 默认 3.0）；0 = 不描边。 */
+    @JavascriptInterface
+    fun setSubBorder(size: Double) {
+        if (!size.isFinite()) return
+        view.lib?.setPropertyDouble("sub-border-size", size.coerceIn(0.0, 10.0))
+    }
+
+    /**
+     * 字幕样式的真实生效值，供 CDP 断言「设置有没有下发」。
+     * 单独一个方法而不是塞进 [debug]：debug 的字段被真机探针按 `key=value` 解析，
+     * 往里加段会破坏既有输出。
+     */
+    @JavascriptInterface
+    fun subStyle(): String {
+        val lib = view.lib ?: return "no-mpv"
+        fun read(key: String): String = runCatching { lib.getPropertyString(key) ?: "-" }.getOrDefault("-")
+        return "sub-delay=" + read("sub-delay") +
+            " sub-scale=" + read("sub-scale") +
+            " sub-pos=" + read("sub-pos") +
+            " sub-visibility=" + read("sub-visibility") +
+            " sub-color=" + read("sub-color") +
+            " sub-border-size=" + read("sub-border-size")
+    }
+
+    /**
+     * 字幕纵向位置，百分比基准是**窗口高度**（mpv 的 sub-pos 语义），不是视频画面高度。
+     * 竖屏 letterbox 时画面底边只到窗口的六成左右，前端必须按实际画面矩形算出字幕底边
+     * 对应的窗口百分比再传进来，不能直接拿 100 当「画面底边」。
      */
     @JavascriptInterface
     fun setSubPos(percent: Double) {
@@ -236,5 +280,9 @@ class AndroidMpv(private val view: MPVView, private val webView: WebView) {
             " hwdec=" + hw + " dropped=" + dropped +
             " surfaceCreates=" + view.surfaceCreates + " attaches=" + view.attaches +
             " attachValid=" + view.lastAttachValid
+    }
+
+    companion object {
+        private val HEX_COLOR = Regex("^#[0-9a-fA-F]{6}$")
     }
 }

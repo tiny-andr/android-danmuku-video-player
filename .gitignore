@@ -6,7 +6,7 @@ bplayer-android/src-tauri/gen/android/build/
 bplayer-android/src-tauri/gen/android/app/build/
 bplayer-android/src-tauri/gen/android/local.properties
 bplayer-android/src-tauri/gen/android/app/src/main/jniLibs/
-# libmpv AAR is ~50 MB; fetch it with scripts/fetch-libmpv.ps1 (pinned URL + sha256) instead.
+# libmpv AAR is ~49 MiB, not committed; fetch it with bplayer-android/scripts/fetch-libmpv.ps1 (pinned URL + SHA256; see research/libmpv-integration.md).
 bplayer-android/src-tauri/gen/android/app/libs/
 
 # IDE
