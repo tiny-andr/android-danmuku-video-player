@@ -1705,7 +1705,31 @@
       // CSS 描边是 0/2/4px 的八向阴影，libass 的 sub-border-size 以字号为基准，
       // 乘 1.5 后「标准」≈ mpv 默认粗细，「加粗」再翻一倍。
       pushMpvSubValue('border', 'setSubBorder', Math.max(0, Math.min(4, Number(subtitlePreferences.outline) || 0)) * 1.5);
-      pushMpvSubValue('pos', 'setSubPos', mpvSubPos());
+      // 位图字幕（PGS / VobSub）的 sub-pos 语义与文本字幕**不同**：mpv 对 image subtitle
+      // 只移动画布下半部的对象，按 (100-p)/100 × 画布高向上推移；文本字幕则是
+      // 「位置 = p% × 窗口高」。两者共用同一套百分比必然错一边。
+      // 位图给 100 = 位移量为 0，保持片源（蓝光）设计好的原始位置，这才是对的。
+      pushMpvSubValue('pos', 'setSubPos', mpvSubIsImage() ? 100 : mpvSubPos());
+    }
+
+    // 当前选中的字幕轨是不是位图（PGS / VobSub）。位图字幕的位置由片源画布决定，
+    // 前端按窗口百分比去挪只会把它推离原位置。
+    //
+    // 判断依据是 codec 而不是 tracks() 里的 image 字段：实测 mpv 对
+    // hdmv_pgs_subtitle 返回的 image 是 false（那个字段并不表示「位图字幕」），
+    // 照着它判断会让 PGS 走进文本分支、被塞一个窗口百分比，位置就飘了。
+    var MPV_IMAGE_SUB_CODECS = /^(hdmv_pgs_subtitle|dvd_subtitle|dvb_subtitle|xsub)$/;
+    function mpvSubIsImage() {
+      if (!window.AndroidMpv || !AndroidMpv.tracks) return false;
+      try {
+        var list = JSON.parse(AndroidMpv.tracks() || '[]');
+        for (var i = 0; i < list.length; i++) {
+          var track = list[i];
+          if (!track || track.type !== 'sub' || !track.selected) continue;
+          if (MPV_IMAGE_SUB_CODECS.test(String(track.codec || ''))) return true;
+        }
+      } catch (e) { }
+      return false;
     }
 
     // mpv 侧字幕的显示开关。Web 层字幕挂载时必须让 mpv 让位，否则同一句话会被
